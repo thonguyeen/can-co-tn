@@ -1,262 +1,126 @@
-'use client'
+'use client';
 
-import { useState, useMemo } from 'react'
-import {
-  Users, UserPlus, Search, MessageCircle, MoreHorizontal, X, Check, MapPin, Briefcase
-} from 'lucide-react'
-import { Avatar, AvatarFallback } from '@/components/ui/avatar'
-import { Button } from '@/components/ui/button'
-import { Card, CardContent } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
-import { cn } from '@/lib/utils'
-import { MOCK_FRIENDS, MOCK_FRIEND_REQUESTS, MOCK_FRIEND_SUGGESTIONS } from '@/lib/mock/data'
+import { useState } from 'react';
+import { Users, UserPlus, X, Star, Handshake, MapPin, ShieldCheck } from 'lucide-react';
+import { BottomNav } from '@/components/intent/BottomNav';
+import { cn } from '@/lib/utils';
+import { MOCK_USERS } from '@/lib/mock/intents';
 
-type Tab = 'all' | 'requests' | 'suggestions'
+const suggestions = [
+  { user: MOCK_USERS[1], reason: 'Cùng quan tâm BĐS Quận 7', match: 87, detail: '3 tin chung · 2 match chung', intents: 10, deals: 4, districts: ['Q7', 'Bình Thạnh'] },
+  { user: MOCK_USERS[4], reason: 'Đang bán đúng thứ bạn tìm (3PN Q7)', match: 82, detail: 'Top seller · Trust 4.8', intents: 15, deals: 8, districts: ['Q7', 'Thủ Đức'] },
+  { user: MOCK_USERS[6], reason: 'Cùng tìm nhà phố Gò Vấp', match: 75, detail: 'Đã xác thực · 5 match', intents: 8, deals: 3, districts: ['Gò Vấp'] },
+  { user: MOCK_USERS[2], reason: 'Cho thuê khu vực Thủ Đức', match: 68, detail: 'KYC · 4 tin đăng', intents: 4, deals: 0, districts: ['Thủ Đức'] },
+  { user: MOCK_USERS[5], reason: 'Cùng quan tâm căn hộ Thủ Đức', match: 65, detail: 'Active buyer · 6 tin', intents: 6, deals: 1, districts: ['Thủ Đức', 'Q2'] },
+];
 
 export default function FriendsPage() {
-  const [activeTab, setActiveTab] = useState<Tab>('all')
-  const [searchQuery, setSearchQuery] = useState('')
-  const [acceptedRequests, setAcceptedRequests] = useState<Set<string>>(new Set())
-  const [rejectedRequests, setRejectedRequests] = useState<Set<string>>(new Set())
-  const [addedSuggestions, setAddedSuggestions] = useState<Set<string>>(new Set())
-  const [removedSuggestions, setRemovedSuggestions] = useState<Set<string>>(new Set())
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  const [connected, setConnected] = useState<Set<string>>(new Set());
 
-  const tabs = [
-    { id: 'all' as Tab, label: 'Tất cả bạn bè', icon: Users },
-    { id: 'requests' as Tab, label: 'Lời mời kết bạn', icon: UserPlus },
-    { id: 'suggestions' as Tab, label: 'Gợi ý', icon: Users },
-  ]
-
-  const filteredFriends = useMemo(() => {
-    if (!searchQuery.trim()) return MOCK_FRIENDS
-    const q = searchQuery.toLowerCase()
-    return MOCK_FRIENDS.filter(
-      f => f.name.toLowerCase().includes(q) || f.job.toLowerCase().includes(q) || f.location.toLowerCase().includes(q)
-    )
-  }, [searchQuery])
-
-  const visibleRequests = MOCK_FRIEND_REQUESTS.filter(
-    r => !acceptedRequests.has(r.id) && !rejectedRequests.has(r.id)
-  )
-
-  const visibleSuggestions = MOCK_FRIEND_SUGGESTIONS.filter(
-    s => !addedSuggestions.has(s.id) && !removedSuggestions.has(s.id)
-  )
+  const visible = suggestions.filter((s) => !dismissed.has(s.user.id));
 
   return (
-    <div className="max-w-[1000px] mx-auto py-6 px-4">
+    <div className="pb-20 md:pb-4">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold">Bạn bè</h1>
-      </div>
-
-      {/* Tabs */}
-      <div className="flex items-center gap-2 mb-6 overflow-x-auto">
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            className={cn(
-              'flex items-center gap-2 px-4 py-2.5 rounded-full text-[15px] font-medium transition-colors whitespace-nowrap',
-              activeTab === tab.id
-                ? 'bg-[#2D6A4F] text-white'
-                : 'bg-secondary text-foreground hover:bg-secondary/80'
-            )}
-          >
-            <tab.icon className="w-4 h-4" />
-            {tab.label}
-            {tab.id === 'requests' && visibleRequests.length > 0 && (
-              <span className="ml-1 px-1.5 py-0.5 text-xs rounded-full bg-white/20">
-                {visibleRequests.length}
-              </span>
-            )}
-          </button>
-        ))}
-      </div>
-
-      {/* Tab: Friend Requests */}
-      {activeTab === 'requests' && (
-        <div>
-          <h2 className="text-lg font-semibold mb-4">Lời mời kết bạn</h2>
-          {visibleRequests.length === 0 ? (
-            <Card>
-              <CardContent className="p-8 text-center text-muted-foreground">
-                Không có lời mời kết bạn nào
-              </CardContent>
-            </Card>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {visibleRequests.map((request) => (
-                <Card key={request.id} className="overflow-hidden">
-                  <CardContent className="p-4 flex gap-4">
-                    <Avatar className="w-20 h-20 shrink-0">
-                      <AvatarFallback
-                        className="text-white text-xl font-bold"
-                        style={{ backgroundColor: request.avatarColor }}
-                      >
-                        {request.name.split(' ').slice(-1)[0][0]}
-                      </AvatarFallback>
-                    </Avatar>
-                    <div className="flex-1 min-w-0">
-                      <p className="font-semibold text-[15px] truncate">{request.name}</p>
-                      <p className="text-sm text-muted-foreground">
-                        {request.mutualFriends} bạn chung
-                      </p>
-                      <p className="text-xs text-muted-foreground mt-0.5">{request.time}</p>
-                      <div className="flex gap-2 mt-3">
-                        <Button
-                          size="sm"
-                          className="flex-1 bg-[#2D6A4F] hover:bg-[#1B4D3E] gap-1"
-                          onClick={() => setAcceptedRequests(prev => new Set(prev).add(request.id))}
-                        >
-                          <Check className="w-4 h-4" />
-                          Xác nhận
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          className="flex-1 gap-1"
-                          onClick={() => setRejectedRequests(prev => new Set(prev).add(request.id))}
-                        >
-                          <X className="w-4 h-4" />
-                          Xoá
-                        </Button>
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          )}
+      <div className="flex items-center justify-between mb-1">
+        <div className="flex items-center gap-2">
+          <Handshake className="w-5 h-5 text-[var(--wm-primary)]" />
+          <h1 className="text-lg font-bold text-foreground">Kết nối nhu cầu</h1>
         </div>
-      )}
+        <span className="text-xs text-muted-foreground tabular-nums">{visible.length} gợi ý</span>
+      </div>
+      <p className="text-xs text-muted-foreground mb-4">
+        AI gợi ý kết nối dựa trên intent của bạn. Kết nối để nhận thông báo khi có tin mới.
+      </p>
 
-      {/* Tab: Suggestions */}
-      {activeTab === 'suggestions' && (
-        <div>
-          <h2 className="text-lg font-semibold mb-4">Những người bạn có thể biết</h2>
-          {visibleSuggestions.length === 0 ? (
-            <Card>
-              <CardContent className="p-8 text-center text-muted-foreground">
-                Không có gợi ý nào
-              </CardContent>
-            </Card>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {visibleSuggestions.map((suggestion) => (
-                <Card key={suggestion.id} className="overflow-hidden">
-                  <CardContent className="p-4 flex gap-4">
-                    <Avatar className="w-20 h-20 shrink-0">
-                      <AvatarFallback
-                        className="text-white text-xl font-bold"
-                        style={{ backgroundColor: suggestion.avatarColor }}
-                      >
-                        {suggestion.name.split(' ').slice(-1)[0][0]}
-                      </AvatarFallback>
-                    </Avatar>
-                    <div className="flex-1 min-w-0">
-                      <p className="font-semibold text-[15px] truncate">{suggestion.name}</p>
-                      <p className="text-sm text-muted-foreground">
-                        {suggestion.mutualFriends} bạn chung
-                      </p>
-                      <div className="flex gap-2 mt-3">
-                        <Button
-                          size="sm"
-                          className="flex-1 bg-[#2D6A4F] hover:bg-[#1B4D3E] gap-1"
-                          onClick={() => setAddedSuggestions(prev => new Set(prev).add(suggestion.id))}
-                        >
-                          <UserPlus className="w-4 h-4" />
-                          Thêm bạn bè
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          className="flex-1 gap-1"
-                          onClick={() => setRemovedSuggestions(prev => new Set(prev).add(suggestion.id))}
-                        >
-                          <X className="w-4 h-4" />
-                          Xoá
-                        </Button>
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          )}
+      {visible.length === 0 ? (
+        <div className="wm-panel p-8 text-center">
+          <Users className="w-8 h-8 mx-auto mb-2 text-[var(--wm-text-faint)]" />
+          <p className="text-sm text-muted-foreground">Không có gợi ý kết nối mới</p>
         </div>
-      )}
+      ) : (
+        <div className="space-y-2">
+          {visible.map((s) => {
+            const isConnected = connected.has(s.user.id);
+            const avatarBg = s.user.verification_level === 'verified' ? 'bg-emerald-600'
+              : s.user.verification_level === 'kyc' ? 'bg-blue-600' : 'bg-zinc-600';
 
-      {/* Tab: All Friends */}
-      {activeTab === 'all' && (
-        <div>
-          {/* Search */}
-          <div className="relative mb-4">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-            <Input
-              placeholder="Tìm kiếm bạn bè..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-10"
-            />
-          </div>
+            return (
+              <div key={s.user.id} className="wm-panel overflow-hidden">
+                {/* Match percentage bar */}
+                <div className="h-0.5 bg-[var(--wm-border)]">
+                  <div
+                    className="h-full bg-[var(--wm-primary)] transition-all"
+                    style={{ width: `${s.match}%` }}
+                  />
+                </div>
 
-          <p className="text-sm text-muted-foreground mb-4">
-            {filteredFriends.length} bạn bè
-            {searchQuery && ` phù hợp với "${searchQuery}"`}
-          </p>
+                <div className="p-3">
+                  <div className="flex items-start gap-3">
+                    {/* Avatar */}
+                    <div className={cn('w-11 h-11 rounded-full flex items-center justify-center text-white text-sm font-bold shrink-0', avatarBg)}>
+                      {s.user.name.split(' ').slice(-1)[0][0]}
+                    </div>
 
-          {filteredFriends.length === 0 ? (
-            <Card>
-              <CardContent className="p-8 text-center text-muted-foreground">
-                Không tìm thấy bạn bè nào
-              </CardContent>
-            </Card>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {filteredFriends.map((friend) => (
-                <Card key={friend.id} className="overflow-hidden hover:bg-secondary/50 transition-colors">
-                  <CardContent className="p-4">
-                    <div className="flex items-start gap-3">
-                      <Avatar className="w-20 h-20 shrink-0">
-                        <AvatarFallback
-                          className="text-white text-xl font-bold"
-                          style={{ backgroundColor: friend.avatarColor }}
-                        >
-                          {friend.name.split(' ').slice(-1)[0][0]}
-                        </AvatarFallback>
-                      </Avatar>
-                      <div className="flex-1 min-w-0">
-                        <p className="font-semibold text-[15px] truncate">{friend.name}</p>
-                        <p className="text-sm text-muted-foreground">
-                          {friend.mutualFriends} bạn chung
-                        </p>
-                        <div className="flex items-center gap-1 mt-1 text-xs text-muted-foreground">
-                          <Briefcase className="w-3 h-3" />
-                          <span className="truncate">{friend.job}</span>
-                        </div>
-                        <div className="flex items-center gap-1 mt-0.5 text-xs text-muted-foreground">
+                    {/* Info */}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5 mb-0.5">
+                        <span className="text-sm font-semibold text-foreground truncate">{s.user.name}</span>
+                        {s.user.verification_level === 'verified' && (
+                          <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        )}
+                        <span className="tabular-nums text-xs font-bold text-[var(--wm-primary)] shrink-0 ml-auto">
+                          {s.match}%
+                        </span>
+                      </div>
+
+                      <p className="text-xs text-muted-foreground mb-1">{s.reason}</p>
+
+                      {/* Stats row */}
+                      <div className="flex items-center gap-3 text-[10px] text-[var(--wm-text-faint)]">
+                        <span className="flex items-center gap-0.5">
+                          <Star className="w-3 h-3 text-yellow-500" />
+                          {s.user.trust_score.toFixed(1)}
+                        </span>
+                        <span>{s.intents} tin</span>
+                        <span>{s.deals} deal</span>
+                        <span className="flex items-center gap-0.5">
                           <MapPin className="w-3 h-3" />
-                          <span>{friend.location}</span>
-                        </div>
+                          {s.districts.join(', ')}
+                        </span>
                       </div>
                     </div>
-                    <div className="flex gap-2 mt-3">
-                      <Button size="sm" variant="secondary" className="flex-1 gap-1">
-                        <MessageCircle className="w-4 h-4" />
-                        Nhắn tin
-                      </Button>
-                      <Button size="sm" variant="ghost" className="px-2">
-                        <MoreHorizontal className="w-4 h-4" />
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          )}
+                  </div>
+
+                  {/* Actions */}
+                  <div className="flex items-center gap-2 mt-2.5 ml-14">
+                    {isConnected ? (
+                      <span className="text-xs text-emerald-400 font-semibold animate-in fade-in">✅ Đã kết nối — sẽ nhận thông báo tin mới</span>
+                    ) : (
+                      <button
+                        onClick={() => setConnected((prev) => new Set([...prev, s.user.id]))}
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-[var(--wm-primary)] text-white hover:opacity-90 transition-opacity"
+                      >
+                        <UserPlus className="w-3.5 h-3.5" />
+                        Kết nối
+                      </button>
+                    )}
+                    <button
+                      onClick={() => setDismissed((prev) => new Set([...prev, s.user.id]))}
+                      className="px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-[var(--wm-surface-hover)] transition-colors"
+                    >
+                      Bỏ qua
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
+
+      <BottomNav />
     </div>
-  )
+  );
 }

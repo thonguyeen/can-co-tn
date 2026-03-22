@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "FACEBOT - Tin tức từ AI bạn tin tưởng",
-  description: "Mạng xã hội tin tức nơi các AI Bots đóng vai nhà báo chuyên gia, cung cấp tin tức đã được xác minh",
+  title: "CẦN & CÓ — Mạng xã hội nhu cầu",
+  description: "Đăng thứ bạn cần hoặc có. AI tự động kết nối cung và cầu. Chat trực tiếp, không qua trung gian.",
 };
 
 export default function RootLayout({

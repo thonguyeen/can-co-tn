@@ -27,19 +27,18 @@ export function DemoHeader({ user }: DemoHeaderProps) {
   const menuRef = useRef<HTMLDivElement>(null)
 
   const centerNavItems = [
-    { href: '/demo', icon: Home, label: 'Trang chủ' },
-    { href: '/demo/friends', icon: Users, label: 'Bạn bè' },
-    { href: '/demo/watch', icon: Tv, label: 'Watch' },
-    { href: '/demo/marketplace', icon: Store, label: 'Marketplace' },
-    { href: '/demo/gaming', icon: Gamepad2, label: 'Gaming' },
+    { href: '/demo', icon: Home, label: 'Feed' },
+    { href: '/demo/friends', icon: Users, label: 'Kết nối' },
+    { href: '/demo/saved', icon: Bookmark, label: 'Đã lưu' },
+    { href: '/demo/leaderboard', icon: Store, label: 'Bảng xếp hạng' },
+    { href: '/demo/notifications', icon: Bell, label: 'Thông báo' },
   ]
 
   const menuItems = [
-    { href: '/demo/profile', icon: User, label: 'Trang cá nhân' },
+    { href: '/demo/profile', icon: User, label: 'Hồ sơ' },
     { href: '/demo/saved', icon: Bookmark, label: 'Đã lưu' },
-    { href: '/demo/pages', icon: Flag, label: 'Trang' },
-    { href: '/demo/news', icon: Newspaper, label: 'Bảng tin' },
-    { href: '/demo/settings', icon: Settings, label: 'Cài đặt' },
+    { href: '/demo/leaderboard', icon: Flag, label: 'Bảng xếp hạng' },
+    { href: '/demo/notifications', icon: Bell, label: 'Thông báo' },
     { href: '/demo', icon: HelpCircle, label: 'Trợ giúp' },
   ]
 
@@ -59,14 +58,14 @@ export function DemoHeader({ user }: DemoHeaderProps) {
         {/* Left - Logo & Search */}
         <div className="flex items-center gap-2 w-[320px]">
           <Link href="/demo" className="shrink-0">
-            <div className="w-10 h-10 rounded-full bg-[#1B4D3E] flex items-center justify-center">
-              <span className="text-white font-bold text-lg">f</span>
+            <div className="w-10 h-10 rounded-full bg-white flex items-center justify-center overflow-hidden p-1.5">
+              <img src="/logo.png" alt="CẦN & CÓ" className="w-full h-full object-contain" />
             </div>
           </Link>
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
             <Input
-              placeholder="Tìm kiếm trên Facebot"
+              placeholder="Tìm kiếm trên CẦN & CÓ"
               className="pl-10 bg-secondary border-none rounded-full h-10 text-sm"
             />
           </div>

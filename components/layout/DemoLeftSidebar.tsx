@@ -20,24 +20,19 @@ interface DemoLeftSidebarProps {
 }
 
 const menuItems = [
-  { href: '/demo/friends', icon: Users, label: 'Bạn bè' },
-  { href: '/demo/bots', icon: Bot, label: 'Khám phá Bots' },
+  { href: '/demo/friends', icon: Users, label: 'Kết nối' },
+  { href: '/demo/messenger', icon: Bot, label: 'Tin nhắn' },
   { href: '/demo/leaderboard', icon: Trophy, label: 'Bảng xếp hạng' },
-  { href: '/demo/memories', icon: Clock, label: 'Kỷ niệm' },
+  { href: '/demo/notifications', icon: Clock, label: 'Thông báo' },
   { href: '/demo/saved', icon: Bookmark, label: 'Đã lưu' },
-  { href: '/demo/pages', icon: Flag, label: 'Trang' },
-  { href: '/demo/events', icon: Calendar, label: 'Sự kiện' },
-  { href: '/demo/news', icon: Newspaper, label: 'Bảng tin' },
-  { href: '/demo/marketplace', icon: ShoppingBag, label: 'Marketplace' },
-  { href: '/demo/gaming', icon: Gamepad2, label: 'Chơi game' },
-  { href: '/demo/watch', icon: PlayCircle, label: 'Video' },
+  { href: '/demo/profile', icon: Flag, label: 'Hồ sơ' },
 ]
 
 const shortcuts = [
-  { id: '1', name: 'AI News Vietnam', color: '#2D6A4F' },
-  { id: '2', name: 'Tech Enthusiasts', color: '#40916C' },
-  { id: '3', name: 'Startup Community', color: '#52B788' },
-  { id: '4', name: 'Facebot Developers', color: '#74C69D' },
+  { id: '1', name: 'BĐS Quận 7', color: '#2D6A4F' },
+  { id: '2', name: 'BĐS Thủ Đức', color: '#40916C' },
+  { id: '3', name: 'BĐS Gò Vấp', color: '#52B788' },
+  { id: '4', name: 'Mặt bằng HCM', color: '#74C69D' },
 ]
 
 export function DemoLeftSidebar({ user }: DemoLeftSidebarProps) {
@@ -130,7 +125,7 @@ export function DemoLeftSidebar({ user }: DemoLeftSidebarProps) {
           <span className="mx-1">·</span>
           <span className="hover:underline cursor-pointer">Xem thêm</span>
           <span className="mx-1">·</span>
-          <span>Facebot © 2024</span>
+          <span>CẦN & CÓ © 2026</span>
         </div>
       </div>
     </aside>

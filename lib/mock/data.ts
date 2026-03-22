@@ -349,8 +349,8 @@ export const MOCK_COMMENTS = [
 
 export const MOCK_USER = {
   id: 'u1000000-0000-0000-0000-000000000001',
-  email: 'demo@facebot.com',
-  display_name: 'Demo User',
+  email: 'demo@canco.vn',
+  display_name: 'Nguyễn Minh Tú',
   avatar_url: 'https://api.dicebear.com/7.x/avataaars/svg?seed=demo',
 }
 

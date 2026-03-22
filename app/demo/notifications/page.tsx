@@ -1,181 +1,77 @@
-'use client'
+'use client';
 
-import { useState } from 'react'
-import { Bell, ThumbsUp, MessageCircle, UserPlus, Share2, AtSign, MoreHorizontal, Check } from 'lucide-react'
-import { Avatar, AvatarFallback } from '@/components/ui/avatar'
-import { Button } from '@/components/ui/button'
-import { Card, CardContent } from '@/components/ui/card'
-import { cn } from '@/lib/utils'
+import { useState } from 'react';
+import { Bell } from 'lucide-react';
+import { BottomNav } from '@/components/intent/BottomNav';
+import { cn, formatDistanceToNow } from '@/lib/utils';
 
-type Tab = 'all' | 'unread'
+const BASE_TIME = new Date('2026-03-22T08:00:00Z').getTime();
+const h = (hours: number) => new Date(BASE_TIME - hours * 60 * 60 * 1000).toISOString();
 
-interface Notification {
-  id: string
-  type: 'like' | 'comment' | 'friend_request' | 'share' | 'mention' | 'group'
-  actor: string
-  actorColor: string
-  content: string
-  time: string
-  read: boolean
-  actionable?: boolean
-}
-
-const initialNotifications: Notification[] = [
-  { id: '1', type: 'like', actor: 'Nguyễn Minh Tuấn', actorColor: '#2D6A4F', content: 'đã thích bài viết của bạn', time: '5 phút trước', read: false },
-  { id: '2', type: 'comment', actor: 'Trần Thị Hương', actorColor: '#1B4D3E', content: 'đã bình luận về bài viết của bạn: "Hay quá! Cảm ơn bạn đã chia sẻ"', time: '15 phút trước', read: false },
-  { id: '3', type: 'friend_request', actor: 'Lưu Quang Minh', actorColor: '#40916C', content: 'đã gửi cho bạn lời mời kết bạn', time: '30 phút trước', read: false, actionable: true },
-  { id: '4', type: 'share', actor: 'Lê Hoàng Nam', actorColor: '#52B788', content: 'đã chia sẻ bài viết của bạn', time: '1 giờ trước', read: true },
-  { id: '5', type: 'mention', actor: 'Phạm Thị Mai', actorColor: '#74C69D', content: 'đã nhắc đến bạn trong một bình luận', time: '2 giờ trước', read: true },
-  { id: '6', type: 'like', actor: 'Hoàng Đức Anh', actorColor: '#2D6A4F', content: 'và 5 người khác đã thích bài viết của bạn', time: '3 giờ trước', read: true },
-  { id: '7', type: 'group', actor: 'AI News Vietnam', actorColor: '#1B4D3E', content: 'có 3 bài viết mới hôm nay', time: '4 giờ trước', read: true },
-  { id: '8', type: 'comment', actor: 'Vũ Thị Lan', actorColor: '#40916C', content: 'đã trả lời bình luận của bạn: "Đồng ý với quan điểm này!"', time: '5 giờ trước', read: true },
-  { id: '9', type: 'friend_request', actor: 'Cao Văn Đạt', actorColor: '#52B788', content: 'đã chấp nhận lời mời kết bạn của bạn', time: '6 giờ trước', read: true },
-  { id: '10', type: 'like', actor: 'Đặng Quốc Bảo', actorColor: '#74C69D', content: 'đã thích ảnh của bạn', time: '1 ngày trước', read: true },
-  { id: '11', type: 'mention', actor: 'Bùi Thị Ngọc', actorColor: '#2D6A4F', content: 'đã nhắc đến bạn trong bài viết tại nhóm Tech Enthusiasts', time: '1 ngày trước', read: true },
-  { id: '12', type: 'share', actor: 'Ngô Thanh Tùng', actorColor: '#1B4D3E', content: 'đã chia sẻ bài viết của bạn với bình luận', time: '2 ngày trước', read: true },
-]
-
-const iconMap = {
-  like: ThumbsUp,
-  comment: MessageCircle,
-  friend_request: UserPlus,
-  share: Share2,
-  mention: AtSign,
-  group: Bell,
-}
-
-const iconColorMap = {
-  like: 'bg-blue-500',
-  comment: 'bg-green-500',
-  friend_request: 'bg-[#2D6A4F]',
-  share: 'bg-orange-500',
-  mention: 'bg-purple-500',
-  group: 'bg-red-500',
-}
+const MOCK_NOTIFICATIONS = [
+  { id: 'n01', type: 'match', icon: '🤝', title: 'Tìm thấy 3 match mới cho "Tìm căn hộ 2PN Q7"', time: h(0.5), read: false },
+  { id: 'n02', type: 'message', icon: '💬', title: 'Trần Anh Khoa đã nhắn: "Dạ anh xem nhà chiều nay..."', time: h(1), read: false },
+  { id: 'n03', type: 'bot', icon: '🤖', title: 'Match Advisor gợi ý mới trên tin Vinhomes Q7', time: h(1.5), read: false },
+  { id: 'n04', type: 'reaction', icon: '👍', title: '8 người quan tâm đến tin Vinhomes Q7 của bạn', time: h(3), read: false },
+  { id: 'n05', type: 'match', icon: '🤝', title: 'Match mới: Sunrise City Q7 3PN phù hợp 87%', time: h(4), read: false },
+  { id: 'n06', type: 'message', icon: '💬', title: 'Lê Hồng Nhung: "Cho em hỏi phí quản lý..."', time: h(5), read: false },
+  { id: 'n07', type: 'bot', icon: '🏠', title: 'Nhà Advisor: Giá Q7 tăng 5% so với tháng trước', time: h(6), read: false },
+  { id: 'n08', type: 'verify', icon: '✅', title: 'CCCD đã được xác thực thành công', time: h(8), read: true },
+  { id: 'n09', type: 'reaction', icon: '💰', title: '5 người đánh giá "Giá hợp lý" tin Masteri', time: h(10), read: true },
+  { id: 'n10', type: 'match', icon: '🤝', title: 'Có người mới đăng nhà phố Gò Vấp phù hợp bạn', time: h(12), read: true },
+  { id: 'n11', type: 'message', icon: '💬', title: 'Đặng Minh Đức: "Giá đã giảm 200tr..."', time: h(14), read: true },
+  { id: 'n12', type: 'saved', icon: '📌', title: 'Tin bạn lưu "Bán Saigon Pearl 3PN" vừa giảm giá', time: h(18), read: true },
+  { id: 'n13', type: 'bot', icon: '📊', title: 'Market Analyst: Báo cáo tuần Q7 — cầu/cung 2.7x', time: h(20), read: true },
+  { id: 'n14', type: 'match', icon: '🤝', title: '2 match mới cho "Tìm nhà phố Bình Thạnh"', time: h(24), read: true },
+  { id: 'n15', type: 'reaction', icon: '🔥', title: 'Tin Sunrise City Q7 đang HOT — 15 quan tâm', time: h(28), read: true },
+  { id: 'n16', type: 'message', icon: '💬', title: 'Hoàng Thanh Hà: "Cuối tuần mình xem nhà nhé"', time: h(32), read: true },
+  { id: 'n17', type: 'verify', icon: '✅', title: 'Sổ đỏ đã được duyệt — Trust Score tăng lên 4.2', time: h(36), read: true },
+  { id: 'n18', type: 'bot', icon: '🛡️', title: 'Trust Checker: Bạn đã xác thực 2/3 — thêm GPS?', time: h(40), read: true },
+  { id: 'n19', type: 'match', icon: '🤝', title: 'Gateway Thảo Điền phù hợp 82% nhu cầu bạn', time: h(48), read: true },
+  { id: 'n20', type: 'reaction', icon: '👍', title: '12 người quan tâm đến tin bán nhà Gò Vấp', time: h(52), read: true },
+  { id: 'n21', type: 'bot', icon: '🤝', title: 'Connector: Nguyễn Minh Tú cũng tìm nhà Q7 — kết nối?', time: h(56), read: true },
+  { id: 'n22', type: 'message', icon: '💬', title: 'Phạm Hoàng Nam: "Anh có thể gửi thêm ảnh?"', time: h(60), read: true },
+  { id: 'n23', type: 'match', icon: '🤝', title: 'Match mới: Căn hộ Tân Phú 2.1 tỷ phù hợp budget', time: h(72), read: true },
+  { id: 'n24', type: 'saved', icon: '📌', title: 'Tin "Cho thuê Masteri" bạn lưu có 3 match mới', time: h(80), read: true },
+  { id: 'n25', type: 'bot', icon: '🎯', title: 'Concierge: Mẹo tăng match — thêm ảnh thật', time: h(88), read: true },
+  { id: 'n26', type: 'reaction', icon: '💰', title: '3 người đánh giá giá hợp lý tin Studio Thủ Đức', time: h(96), read: true },
+  { id: 'n27', type: 'verify', icon: '✅', title: 'GPS check-in thành công — Trust Score: 4.5/5', time: h(108), read: true },
+  { id: 'n28', type: 'match', icon: '🤝', title: '4 match mới tuần này — xem chi tiết →', time: h(120), read: true },
+  { id: 'n29', type: 'message', icon: '💬', title: 'Lê Quốc Bảo: "Deal chốt rồi, cảm ơn bạn!"', time: h(144), read: true },
+  { id: 'n30', type: 'bot', icon: '📊', title: 'Market Analyst: Thủ Đức nóng nhất — 6x cầu/cung', time: h(168), read: true },
+];
 
 export default function NotificationsPage() {
-  const [activeTab, setActiveTab] = useState<Tab>('all')
-  const [notifications, setNotifications] = useState(initialNotifications)
-
-  const unreadCount = notifications.filter(n => !n.read).length
-  const displayedNotifications = activeTab === 'unread'
-    ? notifications.filter(n => !n.read)
-    : notifications
-
-  const markAsRead = (id: string) => {
-    setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n))
-  }
-
-  const markAllAsRead = () => {
-    setNotifications(prev => prev.map(n => ({ ...n, read: true })))
-  }
+  const [notifications, setNotifications] = useState(MOCK_NOTIFICATIONS);
+  const unread = notifications.filter((n) => !n.read).length;
 
   return (
-    <div className="max-w-[700px] mx-auto py-6 px-4">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold">Thông báo</h1>
-        {unreadCount > 0 && (
-          <Button variant="ghost" size="sm" className="text-[#2D6A4F] gap-1" onClick={markAllAsRead}>
-            <Check className="w-4 h-4" />
-            Đánh dấu tất cả đã đọc
-          </Button>
+    <div className="pb-20 md:pb-4">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <Bell className="w-5 h-5 text-[var(--wm-primary)]" />
+          <h1 className="text-lg font-bold text-foreground">Thông báo</h1>
+          {unread > 0 && <span className="px-1.5 py-0.5 text-[10px] font-bold bg-red-500 text-white rounded-full">{unread}</span>}
+        </div>
+        {unread > 0 && (
+          <button onClick={() => setNotifications((p) => p.map((n) => ({ ...n, read: true })))} className="text-xs text-[var(--wm-primary)] font-semibold">Đọc tất cả</button>
         )}
       </div>
 
-      {/* Tabs */}
-      <div className="flex items-center gap-2 mb-4">
-        <button
-          onClick={() => setActiveTab('all')}
-          className={cn(
-            'px-4 py-2 rounded-full text-sm font-medium transition-colors',
-            activeTab === 'all' ? 'bg-[#2D6A4F] text-white' : 'bg-secondary hover:bg-secondary/80'
-          )}
-        >
-          Tất cả
-        </button>
-        <button
-          onClick={() => setActiveTab('unread')}
-          className={cn(
-            'px-4 py-2 rounded-full text-sm font-medium transition-colors',
-            activeTab === 'unread' ? 'bg-[#2D6A4F] text-white' : 'bg-secondary hover:bg-secondary/80'
-          )}
-        >
-          Chưa đọc
-          {unreadCount > 0 && (
-            <span className="ml-1.5 px-1.5 py-0.5 text-xs rounded-full bg-white/20">
-              {unreadCount}
-            </span>
-          )}
-        </button>
+      <div className="wm-panel divide-y divide-[var(--wm-border-subtle,#2F3032)]">
+        {notifications.map((n) => (
+          <button key={n.id} onClick={() => setNotifications((p) => p.map((item) => item.id === n.id ? { ...item, read: true } : item))}
+            className={cn('w-full flex items-start gap-3 p-3 text-left hover:bg-[var(--wm-surface-hover)] transition-colors', !n.read && 'bg-[var(--wm-primary)]/5')}>
+            <span className="text-lg shrink-0">{n.icon}</span>
+            <div className="flex-1 min-w-0">
+              <p className={cn('text-sm leading-snug', !n.read ? 'text-foreground font-medium' : 'text-muted-foreground')}>{n.title}</p>
+              <p className="text-[10px] text-muted-foreground mt-0.5">{formatDistanceToNow(n.time)}</p>
+            </div>
+            {!n.read && <span className="w-2.5 h-2.5 bg-[var(--wm-primary)] rounded-full mt-1 shrink-0" />}
+          </button>
+        ))}
       </div>
-
-      {/* Notifications List */}
-      {displayedNotifications.length === 0 ? (
-        <Card>
-          <CardContent className="p-8 text-center text-muted-foreground">
-            <Bell className="w-12 h-12 mx-auto mb-3 text-muted-foreground/50" />
-            <p>Không có thông báo nào</p>
-          </CardContent>
-        </Card>
-      ) : (
-        <div className="space-y-1">
-          {displayedNotifications.map((notification) => {
-            const Icon = iconMap[notification.type]
-            return (
-              <div
-                key={notification.id}
-                onClick={() => markAsRead(notification.id)}
-                className={cn(
-                  'flex items-start gap-3 p-3 rounded-lg cursor-pointer transition-colors',
-                  notification.read ? 'hover:bg-secondary/50' : 'bg-[#2D6A4F]/5 hover:bg-[#2D6A4F]/10'
-                )}
-              >
-                <div className="relative shrink-0">
-                  <Avatar className="w-14 h-14">
-                    <AvatarFallback className="text-white font-bold text-lg" style={{ backgroundColor: notification.actorColor }}>
-                      {notification.actor.split(' ').slice(-1)[0][0]}
-                    </AvatarFallback>
-                  </Avatar>
-                  <div className={cn('absolute -bottom-1 -right-1 w-6 h-6 rounded-full flex items-center justify-center', iconColorMap[notification.type])}>
-                    <Icon className="w-3.5 h-3.5 text-white" />
-                  </div>
-                </div>
-
-                <div className="flex-1 min-w-0">
-                  <p className="text-[15px]">
-                    <span className="font-semibold">{notification.actor}</span>{' '}
-                    <span className="text-muted-foreground">{notification.content}</span>
-                  </p>
-                  <p className={cn('text-sm mt-0.5', notification.read ? 'text-muted-foreground' : 'text-[#2D6A4F] font-medium')}>
-                    {notification.time}
-                  </p>
-
-                  {notification.actionable && !notification.read && (
-                    <div className="flex gap-2 mt-2">
-                      <Button size="sm" className="bg-[#2D6A4F] hover:bg-[#1B4D3E]">
-                        Xác nhận
-                      </Button>
-                      <Button size="sm" variant="secondary">
-                        Xoá
-                      </Button>
-                    </div>
-                  )}
-                </div>
-
-                <div className="flex items-center gap-1 shrink-0">
-                  {!notification.read && (
-                    <div className="w-3 h-3 rounded-full bg-[#2D6A4F]" />
-                  )}
-                  <Button variant="ghost" size="icon" className="w-8 h-8">
-                    <MoreHorizontal className="w-4 h-4" />
-                  </Button>
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      )}
+      <BottomNav />
     </div>
-  )
+  );
 }

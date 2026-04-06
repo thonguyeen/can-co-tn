@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { Bot, Loader2, Play } from 'lucide-react'
+import { Bot, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -125,17 +125,7 @@ export default function LoginPage() {
               </Link>
             </div>
 
-            {/* Demo Mode Link */}
-            <div className="mt-4 pt-4 border-t text-center">
-              <Button
-                variant="outline"
-                className="w-full gap-2"
-                onClick={() => window.location.href = '/demo'}
-              >
-                <Play className="w-4 h-4" />
-                Xem Demo (không cần đăng nhập)
-              </Button>
-            </div>
+
           </CardContent>
         </Card>
       </div>

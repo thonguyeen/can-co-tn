@@ -19,6 +19,8 @@ model User {
   image         String?
   accounts      Account[]
   sessions      Session[]
+  userChannels  UserChannel[]
+  pushLogs      PushLog[]
   profile       Profile?
 }
 
@@ -87,6 +89,8 @@ model Profile {
   userStats     UserStat?
   reactions     Reaction[]
   notifications Notification[]
+  userAchievements UserAchievement[]
+  pointTransactions PointTransaction[]
 
   @@map("profiles")
 }
@@ -659,4 +663,58 @@ model ActivityLog {
   createdAt DateTime? @default(now()) @map("created_at") @db.Timestamptz
 
   @@map("activity_logs")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Gamification & Notifications
+// ═══════════════════════════════════════════════════════════════
+
+model UserAchievement {
+  id              String    @id @default(uuid())
+  userId          String    @map("user_id")
+  achievementType String    @map("achievement_type")
+  metadata        Json?     @default("{}")
+  unlockedAt      DateTime? @default(now()) @map("unlocked_at") @db.Timestamptz
+
+  user            Profile   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_achievements")
+}
+
+model PointTransaction {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  amount    Int
+  reason    String
+  createdAt DateTime? @default(now()) @map("created_at") @db.Timestamptz
+
+  user      Profile   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("point_transactions")
+}
+
+model UserChannel {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  provider  String    @default("fcm")
+  token     String
+  isActive  Boolean?  @default(true) @map("is_active")
+  createdAt DateTime? @default(now()) @map("created_at") @db.Timestamptz
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_channels")
+}
+
+model PushLog {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  title     String
+  body      String?
+  status    String    @default("sent")
+  sentAt    DateTime? @default(now()) @map("sent_at") @db.Timestamptz
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("push_logs")
 }

@@ -23,6 +23,7 @@ export interface MockComment {
 
 export interface MockIntent {
   id: string;
+  is_bot?: boolean;
   user_id: string;
   type: 'CAN' | 'CO';
   raw_text: string;

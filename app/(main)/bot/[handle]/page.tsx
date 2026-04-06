@@ -1,5 +1,7 @@
 import { notFound } from 'next/navigation'
-import { createClient } from '@/lib/supabase/server'
+import { getServerSession } from 'next-auth'
+import { authOptions } from '@/lib/auth'
+import { prisma } from '@/lib/db'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { BotAvatar } from '@/components/bot/BotAvatar'
@@ -13,49 +15,42 @@ interface BotProfilePageProps {
 
 export default async function BotProfilePage({ params }: BotProfilePageProps) {
   const { handle } = await params
-  const supabase = await createClient()
-
+  
   // Get current user
-  const { data: { user } } = await supabase.auth.getUser()
+  const session = await getServerSession(authOptions)
+  const user = session?.user
 
   // Get bot by handle
-  const { data: botData, error } = await supabase
-    .from('bots')
-    .select('*')
-    .eq('handle', handle)
-    .single()
+  const botData = await prisma.$queryRaw<any[]>`SELECT * FROM bots WHERE handle = ${handle} LIMIT 1`
+  const botRow = botData[0]
 
-  if (error || !botData) {
+  if (!botRow) {
     notFound()
   }
 
-  const bot = botData as Bot
+  const bot = botRow as Bot
 
   // Check if user is following this bot
   let isFollowing = false
   if (user) {
-    const { data: follow } = await supabase
-      .from('follows')
-      .select('*')
-      .eq('user_id', user.id)
-      .eq('bot_id', bot.id)
-      .single()
-    isFollowing = !!follow
+    const userId = (user as any).id;
+    const followData = await prisma.$queryRaw<any[]>`
+      SELECT id FROM follows WHERE user_id = ${userId}::uuid AND bot_id = ${bot.id} LIMIT 1
+    `
+    isFollowing = followData.length > 0
   }
 
   // Get bot's posts
-  const { data: posts } = await supabase
-    .from('posts')
-    .select(`
-      *,
-      bot:bots (*)
-    `)
-    .eq('bot_id', bot.id)
-    .order('created_at', { ascending: false })
-    .limit(20)
+  const posts = await prisma.$queryRaw<any[]>`
+    SELECT p.*, row_to_json(b.*) as bot
+    FROM posts p
+    LEFT JOIN bots b ON p.bot_id = b.id
+    WHERE p.bot_id = ${bot.id}
+    ORDER BY p.created_at DESC
+    LIMIT 20
+  `
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const postsWithBot = ((posts || []) as any[]).map((post) => ({
+  const postsWithBot = (posts || []).map((post) => ({
     ...post,
     sources: post.sources || [],
     bot: post.bot,
@@ -66,15 +61,12 @@ export default async function BotProfilePage({ params }: BotProfilePageProps) {
   let savedPostIds: string[] = []
 
   if (user) {
-    const [likesResult, savesResult] = await Promise.all([
-      supabase.from('likes').select('post_id').eq('user_id', user.id),
-      supabase.from('saves').select('post_id').eq('user_id', user.id),
-    ])
+    const userId = (user as any).id;
+    const likesResult = await prisma.$queryRaw<any[]>`SELECT post_id FROM likes WHERE user_id = ${userId}::uuid`
+    const savesResult = await prisma.$queryRaw<any[]>`SELECT post_id FROM saves WHERE user_id = ${userId}::uuid`
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    likedPostIds = ((likesResult.data || []) as any[]).map((l) => l.post_id)
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    savedPostIds = ((savesResult.data || []) as any[]).map((s) => s.post_id)
+    likedPostIds = (likesResult || []).map((l) => l.post_id)
+    savedPostIds = (savesResult || []).map((s) => s.post_id)
   }
 
   return (

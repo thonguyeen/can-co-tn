@@ -1,85 +1,51 @@
-import { createServerClient } from '@supabase/ssr'
-import { NextResponse, type NextRequest } from 'next/server'
+import { getToken } from "next-auth/jwt"
+import { NextResponse, type NextRequest } from "next/server"
 
 export async function middleware(request: NextRequest) {
-  // Skip middleware for demo routes and API routes
-  if (
-    request.nextUrl.pathname.startsWith('/demo') ||
-    request.nextUrl.pathname.startsWith('/api/')
-  ) {
+  const token = await getToken({ req: request })
+
+  const pathname = request.nextUrl.pathname
+
+  // Bỏ qua kiểm tra cho hệ thống xác thực NextAuth
+  if (pathname.startsWith('/api/auth')) {
     return NextResponse.next()
   }
 
-  // Check if Supabase is configured
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-  if (!supabaseUrl || supabaseUrl.includes('placeholder')) {
-    // No valid Supabase - allow access to login/register, redirect others to demo
-    if (
-      request.nextUrl.pathname.startsWith('/login') ||
-      request.nextUrl.pathname.startsWith('/register')
-    ) {
-      return NextResponse.next()
+  // Các Cron Job được check bảo mật bằng CRON_SECRET bên trong code Route, được đi qua
+  if (pathname.startsWith('/api/cron')) {
+    return NextResponse.next()
+  }
+
+  // Khóa CHẶT tất cả các API route còn lại. Trả về 401 nếu gõ lệnh láo
+  if (pathname.startsWith('/api/')) {
+    if (!token) {
+      return NextResponse.json({ error: "Unauthorized / Cần đăng nhập để dùng API" }, { status: 401 })
     }
-    const url = request.nextUrl.clone()
-    url.pathname = '/demo'
-    return NextResponse.redirect(url)
+    return NextResponse.next()
   }
 
-  let supabaseResponse = NextResponse.next({
-    request,
-  })
+  // Vùng Demo cho phép truy cập Public
+  if (pathname.startsWith('/demo')) {
+    return NextResponse.next()
+  }
 
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return request.cookies.getAll()
-        },
-        setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value }) =>
-            request.cookies.set(name, value)
-          )
-          supabaseResponse = NextResponse.next({
-            request,
-          })
-          cookiesToSet.forEach(({ name, value, options }) =>
-            supabaseResponse.cookies.set(name, value, options)
-          )
-        },
-      },
+  const isAuthRoute = pathname.startsWith('/login') || pathname.startsWith('/register')
+
+  // Đã có session thì đá đít khỏi trang đăng nhập
+  if (isAuthRoute) {
+    if (token) {
+      return NextResponse.redirect(new URL('/', request.url))
     }
-  )
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-
-  // Protected routes - redirect to login if not authenticated
-  if (
-    !user &&
-    !request.nextUrl.pathname.startsWith('/login') &&
-    !request.nextUrl.pathname.startsWith('/register') &&
-    !request.nextUrl.pathname.startsWith('/auth')
-  ) {
-    const url = request.nextUrl.clone()
-    url.pathname = '/login'
-    return NextResponse.redirect(url)
+    return NextResponse.next()
   }
 
-  // Redirect logged-in users away from auth pages
-  if (
-    user &&
-    (request.nextUrl.pathname.startsWith('/login') ||
-      request.nextUrl.pathname.startsWith('/register'))
-  ) {
-    const url = request.nextUrl.clone()
-    url.pathname = '/feed'
-    return NextResponse.redirect(url)
+  // Protected routes - Người lạ cấm vào
+  if (!token) {
+    const loginUrl = new URL(`/login?redirect=${encodeURIComponent(pathname)}`, request.url)
+    return NextResponse.redirect(loginUrl)
   }
 
-  return supabaseResponse
+  return NextResponse.next()
 }
 
 export const config = {

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { ImagePlus, X, Loader2, Sparkles } from 'lucide-react';
+import { ImagePlus, X, Loader2, Sparkles, ShieldAlert } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { MockIntent } from '@/lib/mock/intents';
 
@@ -10,6 +10,10 @@ interface ComposeIntentProps {
   mode?: 'demo' | 'real';
   onSubmit?: (intent: MockIntent) => void;
   onIntentCreated?: () => void;
+  /** Edit mode: pre-fill with existing intent */
+  editIntent?: MockIntent | null;
+  onEditComplete?: () => void;
+  onCancelEdit?: () => void;
 }
 
 const PLACEHOLDERS = {
@@ -64,19 +68,25 @@ function extractDemoTags(text: string): { icon: string; label: string }[] {
   return tags;
 }
 
-export function ComposeIntent({ mode = 'demo', onSubmit, onIntentCreated }: ComposeIntentProps) {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [type, setType] = useState<'CAN' | 'CO'>('CAN');
-  const [text, setText] = useState('');
+export function ComposeIntent({ mode = 'demo', onSubmit, onIntentCreated, editIntent, onEditComplete, onCancelEdit }: ComposeIntentProps) {
+  const isEditMode = !!editIntent;
+  const [isExpanded, setIsExpanded] = useState(isEditMode);
+  const [type, setType] = useState<'CAN' | 'CO'>(editIntent?.type || 'CAN');
+  const [text, setText] = useState(editIntent?.raw_text || '');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isParsing, setIsParsing] = useState(false);
   const [showTags, setShowTags] = useState(false);
   const [tags, setTags] = useState<{ icon: string; label: string }[]>([]);
   const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [violation, setViolation] = useState<{ message: string; count: number; max: number; banned: boolean } | null>(null);
+  const [mismatch, setMismatch] = useState<{ suggested: 'CAN' | 'CO'; strict?: boolean } | null>(null);
   const [selectedImages, setSelectedImages] = useState<File[]>([]);
   const [imagePreviews, setImagePreviews] = useState<string[]>([]);
   const parseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const currentTagsRef = useRef<{ icon: string; label: string; type?: string }[]>([]);
+  // Cache dismissed mismatch to re-warn on submit
+  const dismissedMismatchRef = useRef<{ suggested: 'CAN' | 'CO'; textSnapshot: string } | null>(null);
 
   // Auto-dismiss toast
   useEffect(() => {
@@ -102,34 +112,69 @@ export function ComposeIntent({ mode = 'demo', onSubmit, onIntentCreated }: Comp
       } else {
         setShowTags(false);
       }
+      // Check for type mismatch
+      if (data.suggested_type && data.suggested_type !== type) {
+        setMismatch({ suggested: data.suggested_type });
+      } else {
+        setMismatch(null);
+      }
     } catch {
       // Fail silently
     } finally {
       setIsParsing(false);
     }
-  }, []);
+  }, [type]);
 
   const handleTextChange = useCallback((value: string) => {
     setText(value);
 
-    if (mode === 'demo') {
-      if (value.length > 15) {
-        const extracted = extractDemoTags(value);
-        setTags(extracted);
-        setShowTags(extracted.length > 0);
+    // Clear dismissed mismatch cache when text changes
+    dismissedMismatchRef.current = null;
+
+    if (parseTimerRef.current) clearTimeout(parseTimerRef.current);
+
+    if (value.length >= 15) {
+      if (mode === 'demo') {
+        // Try AI first, fallback to demo tags
+        parseTimerRef.current = setTimeout(async () => {
+          setIsParsing(true);
+          try {
+            const res = await fetch('/api/intents/parse', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ raw_text: value }),
+            });
+            const data = await res.json();
+            if (data.tags && data.tags.length > 0) {
+              setTags(data.tags);
+              currentTagsRef.current = data.tags;
+              setShowTags(true);
+            } else {
+              const extracted = extractDemoTags(value);
+              setTags(extracted);
+              setShowTags(extracted.length > 0);
+            }
+            // Check for type mismatch  
+            if (data.suggested_type && data.suggested_type !== type) {
+              setMismatch({ suggested: data.suggested_type });
+            } else {
+              setMismatch(null);
+            }
+          } catch {
+            const extracted = extractDemoTags(value);
+            setTags(extracted);
+            setShowTags(extracted.length > 0);
+          } finally {
+            setIsParsing(false);
+          }
+        }, 1500);
       } else {
-        setShowTags(false);
-        setTags([]);
+        // Real mode: debounced AI parsing
+        parseTimerRef.current = setTimeout(() => parseWithAI(value), 2000);
       }
     } else {
-      // Real mode: debounced AI parsing
-      if (parseTimerRef.current) clearTimeout(parseTimerRef.current);
-      if (value.length >= 15) {
-        parseTimerRef.current = setTimeout(() => parseWithAI(value), 2000);
-      } else {
-        setShowTags(false);
-        setTags([]);
-      }
+      setShowTags(false);
+      setTags([]);
     }
   }, [mode, parseWithAI]);
 
@@ -137,17 +182,29 @@ export function ComposeIntent({ mode = 'demo', onSubmit, onIntentCreated }: Comp
     setIsSubmitting(true);
     await new Promise((r) => setTimeout(r, 800));
 
+    const aiTags = currentTagsRef.current;
+
+    // Extract structured data from AI tags
+    const districtTag = aiTags.find(t => t.type === 'district');
+    const priceTag = aiTags.find(t => t.type === 'price');
+    const bedroomTag = aiTags.find(t => t.type === 'bedrooms');
+
     const newIntent: MockIntent = {
       id: `i-new-${Date.now()}`,
       user_id: 'demo-user',
       type,
       raw_text: text,
       title: text.slice(0, 80),
-      parsed_data: {},
+      parsed_data: {
+        district: districtTag?.label || null,
+        bedrooms: bedroomTag ? parseInt(bedroomTag.label) : null,
+        price_label: priceTag?.label || null,
+        ai_tags: aiTags,
+      },
       category: 'real_estate',
       subcategory: 'apartment',
       price: null, price_min: null, price_max: null,
-      address: null, district: null, ward: null,
+      address: null, district: districtTag?.label || null, ward: null,
       city: 'Hồ Chí Minh', lat: null, lng: null,
       trust_score: 1, verification_level: 'none',
       comment_count: 0, match_count: 0, view_count: 0,
@@ -183,7 +240,27 @@ export function ComposeIntent({ mode = 'demo', onSubmit, onIntentCreated }: Comp
   const handleSubmitReal = async () => {
     setIsSubmitting(true);
     try {
-      // 1. Create intent
+      if (isEditMode && editIntent) {
+        // EDIT mode: PUT to update
+        const res = await fetch(`/api/intents/${editIntent.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ raw_text: text, type }),
+        });
+
+        if (!res.ok) {
+          const err = await res.json();
+          if (res.status === 401) throw new Error('LOGIN_REQUIRED');
+          throw new Error(err.error || 'Không thể cập nhật');
+        }
+
+        setToast({ type: 'success', message: 'Đã cập nhật thành công!' });
+        onEditComplete?.();
+        resetForm();
+        return;
+      }
+
+      // CREATE mode: POST new intent
       const res = await fetch('/api/intents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -192,6 +269,20 @@ export function ComposeIntent({ mode = 'demo', onSubmit, onIntentCreated }: Comp
 
       if (!res.ok) {
         const err = await res.json();
+        if (res.status === 401) {
+          throw new Error('LOGIN_REQUIRED');
+        }
+        // Handle content moderation violations
+        if (err.code === 'CONTENT_VIOLATION' || err.code === 'ACCOUNT_BANNED') {
+          setViolation({
+            message: err.error,
+            count: err.violation_count || 0,
+            max: err.max_violations || 3,
+            banned: err.code === 'ACCOUNT_BANNED',
+          });
+          setIsSubmitting(false);
+          return;
+        }
         throw new Error(err.error || 'Failed');
       }
 
@@ -214,6 +305,10 @@ export function ComposeIntent({ mode = 'demo', onSubmit, onIntentCreated }: Comp
       onIntentCreated?.();
       resetForm();
     } catch (err) {
+      if (err instanceof Error && err.message === 'LOGIN_REQUIRED') {
+        window.location.href = '/login?redirect=/demo';
+        return;
+      }
       setToast({ type: 'error', message: err instanceof Error ? err.message : 'Không thể đăng, vui lòng thử lại' });
       setIsSubmitting(false);
     }
@@ -221,6 +316,14 @@ export function ComposeIntent({ mode = 'demo', onSubmit, onIntentCreated }: Comp
 
   const handleSubmit = () => {
     if (text.trim().length < 10) return;
+
+    // Check dismissed mismatch cache — if user didn't change text, force re-confirm (strict)
+    const cache = dismissedMismatchRef.current;
+    if (cache && cache.textSnapshot === text.trim() && cache.suggested !== type) {
+      setMismatch({ suggested: cache.suggested, strict: true });
+      return;
+    }
+
     if (mode === 'demo') {
       handleSubmitDemo();
     } else {
@@ -231,6 +334,7 @@ export function ComposeIntent({ mode = 'demo', onSubmit, onIntentCreated }: Comp
   const resetForm = () => {
     setText('');
     setTags([]);
+    currentTagsRef.current = [];
     setShowTags(false);
     setIsExpanded(false);
     setIsSubmitting(false);
@@ -239,8 +343,8 @@ export function ComposeIntent({ mode = 'demo', onSubmit, onIntentCreated }: Comp
     setImagePreviews([]);
   };
 
-  // Collapsed state
-  if (!isExpanded) {
+  // Collapsed state (skip when in edit mode)
+  if (!isExpanded && !isEditMode) {
     return (
       <>
         <button
@@ -263,9 +367,9 @@ export function ComposeIntent({ mode = 'demo', onSubmit, onIntentCreated }: Comp
     <>
       <div className="wm-panel">
         <div className="wm-panel-header">
-          <span className="wm-panel-title">Đăng nhu cầu</span>
+          <span className="wm-panel-title">{isEditMode ? 'Chỉnh sửa bài viết' : 'Đăng nhu cầu'}</span>
           <button
-            onClick={() => { resetForm(); }}
+            onClick={() => { if (isEditMode) { onCancelEdit?.(); } else { resetForm(); } }}
             className="p-1 hover:bg-[var(--wm-surface-hover)] transition-colors"
           >
             <X className="w-4 h-4 text-[var(--wm-text-muted)]" />
@@ -276,7 +380,7 @@ export function ComposeIntent({ mode = 'demo', onSubmit, onIntentCreated }: Comp
           {/* Type Toggle */}
           <div className="flex gap-1">
             <button
-              onClick={() => { setType('CAN'); setSelectedImages([]); imagePreviews.forEach(u => URL.revokeObjectURL(u)); setImagePreviews([]); }}
+              onClick={() => { setType('CAN'); setMismatch(null); setSelectedImages([]); imagePreviews.forEach(u => URL.revokeObjectURL(u)); setImagePreviews([]); }}
               className={cn(
                 'flex-1 py-2 text-sm font-semibold transition-colors border',
                 type === 'CAN'
@@ -287,7 +391,7 @@ export function ComposeIntent({ mode = 'demo', onSubmit, onIntentCreated }: Comp
               CẦN
             </button>
             <button
-              onClick={() => setType('CO')}
+              onClick={() => { setType('CO'); setMismatch(null); }}
               className={cn(
                 'flex-1 py-2 text-sm font-semibold transition-colors border',
                 type === 'CO'
@@ -337,6 +441,21 @@ export function ComposeIntent({ mode = 'demo', onSubmit, onIntentCreated }: Comp
               <Loader2 className="w-3 h-3 animate-spin" />
               <span>AI đang phân tích...</span>
             </div>
+          )}
+
+          {/* Mismatch Banner */}
+          {mismatch && (
+            <MismatchBanner
+              currentType={type}
+              suggestedType={mismatch.suggested}
+              strict={mismatch.strict}
+              onSwitch={() => { setType(mismatch.suggested); setMismatch(null); dismissedMismatchRef.current = null; }}
+              onKeep={mismatch.strict ? undefined : () => {
+                dismissedMismatchRef.current = { suggested: mismatch.suggested, textSnapshot: text.trim() };
+                setMismatch(null);
+              }}
+              onEditText={() => { setMismatch(null); }}
+            />
           )}
 
           {/* Image Upload (CÓ only) */}
@@ -399,6 +518,8 @@ export function ComposeIntent({ mode = 'demo', onSubmit, onIntentCreated }: Comp
           >
             {isSubmitting ? (
               <Loader2 className="w-4 h-4 animate-spin mx-auto" />
+            ) : isEditMode ? (
+              'Cập nhật bài viết'
             ) : type === 'CAN' ? (
               'Đăng nhu cầu'
             ) : (
@@ -408,6 +529,15 @@ export function ComposeIntent({ mode = 'demo', onSubmit, onIntentCreated }: Comp
         </div>
       </div>
       {toast && <Toast {...toast} />}
+      {violation && (
+        <ViolationWarning
+          message={violation.message}
+          count={violation.count}
+          max={violation.max}
+          banned={violation.banned}
+          onDismiss={() => setViolation(null)}
+        />
+      )}
     </>
   );
 }
@@ -419,6 +549,143 @@ function Toast({ type, message }: { type: 'success' | 'error'; message: string }
       type === 'success' ? 'bg-emerald-600' : 'bg-red-500',
     )}>
       {message}
+    </div>
+  );
+}
+
+function ViolationWarning({ message, count, max, banned, onDismiss }: {
+  message: string;
+  count: number;
+  max: number;
+  banned: boolean;
+  onDismiss: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <div className={cn(
+        'w-full max-w-md p-5 shadow-2xl border',
+        banned
+          ? 'bg-red-950 border-red-700'
+          : 'bg-[var(--wm-surface)] border-amber-600/50',
+      )}>
+        <div className="flex items-start gap-3 mb-4">
+          <ShieldAlert className={cn(
+            'w-8 h-8 shrink-0 mt-0.5',
+            banned ? 'text-red-400' : 'text-amber-400',
+          )} />
+          <div>
+            <h3 className={cn(
+              'text-base font-bold mb-1',
+              banned ? 'text-red-300' : 'text-amber-300',
+            )}>
+              {banned ? '🔒 Tài khoản đã bị khóa' : '⚠️ Nội dung bị từ chối'}
+            </h3>
+            <p className="text-sm text-[var(--wm-text-secondary)] whitespace-pre-line leading-relaxed">
+              {message}
+            </p>
+          </div>
+        </div>
+
+        {/* Strike counter */}
+        {!banned && (
+          <div className="mb-4">
+            <div className="flex items-center justify-between text-xs mb-1.5">
+              <span className="text-[var(--wm-text-muted)]">Số lần vi phạm</span>
+              <span className={cn(
+                'font-bold',
+                count >= 2 ? 'text-red-400' : 'text-amber-400',
+              )}>
+                {count} / {max}
+              </span>
+            </div>
+            <div className="w-full h-2 bg-zinc-700 rounded-full overflow-hidden">
+              <div
+                className={cn(
+                  'h-full rounded-full transition-all duration-500',
+                  count >= 2 ? 'bg-red-500' : 'bg-amber-500',
+                )}
+                style={{ width: `${(count / max) * 100}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        <button
+          onClick={onDismiss}
+          className={cn(
+            'w-full py-2.5 text-sm font-semibold text-white',
+            banned
+              ? 'bg-red-700 hover:bg-red-600'
+              : 'bg-amber-600 hover:bg-amber-500',
+          )}
+        >
+          {banned ? 'Đã hiểu' : 'Đóng'}
+        </button>
+      </div>
+    </div>
+  );
+}
+function MismatchBanner({ currentType, suggestedType, strict, onSwitch, onKeep, onEditText }: {
+  currentType: 'CAN' | 'CO';
+  suggestedType: 'CAN' | 'CO';
+  strict?: boolean;
+  onSwitch: () => void;
+  onKeep?: () => void;
+  onEditText?: () => void;
+}) {
+  const currentLabel = currentType === 'CAN' ? 'CẦN' : 'CÓ';
+  const suggestedLabel = suggestedType === 'CAN' ? 'CẦN' : 'CÓ';
+
+  return (
+    <div className={cn(
+      'p-3 border space-y-2',
+      strict
+        ? 'border-amber-500/40 bg-amber-500/10'
+        : 'border-blue-500/30 bg-blue-500/10',
+    )}>
+      <div className="flex items-start gap-2">
+        <span className="text-base">{strict ? '⚠️' : '🤔'}</span>
+        <div className="flex-1 min-w-0">
+          <p className={cn(
+            'text-sm font-medium mb-0.5',
+            strict ? 'text-amber-300' : 'text-blue-300',
+          )}>
+            {strict ? 'Nội dung vẫn không khớp!' : 'Anh có nhầm không?'}
+          </p>
+          <p className="text-xs text-[var(--wm-text-secondary)] leading-relaxed">
+            {strict
+              ? <>Anh vẫn chọn <strong className="text-[var(--wm-text)]">{currentLabel}</strong> nhưng nội dung giống <strong className="text-[var(--wm-text)]">{suggestedLabel}</strong>. Vui lòng <strong className="text-amber-300">đổi loại tin</strong> hoặc <strong className="text-amber-300">sửa nội dung</strong> cho phù hợp.</>
+              : <>Anh đang chọn <strong className="text-[var(--wm-text)]">{currentLabel}</strong> nhưng nội dung giống <strong className="text-[var(--wm-text)]">{suggestedLabel}</strong> hơn.</>
+            }
+          </p>
+        </div>
+      </div>
+      <div className="flex gap-2">
+        <button
+          onClick={onSwitch}
+          className={cn(
+            'flex-1 py-1.5 text-xs font-semibold text-white',
+            suggestedType === 'CAN' ? 'bg-red-500 hover:bg-red-600' : 'bg-emerald-600 hover:bg-emerald-700',
+          )}
+        >
+          Đổi sang {suggestedLabel}
+        </button>
+        {strict ? (
+          <button
+            onClick={onEditText}
+            className="flex-1 py-1.5 text-xs font-semibold text-amber-400 border border-amber-500/40 hover:bg-amber-500/10"
+          >
+            ← Sửa nội dung
+          </button>
+        ) : (
+          <button
+            onClick={onKeep}
+            className="flex-1 py-1.5 text-xs font-medium text-[var(--wm-text-muted)] border border-[var(--wm-border)] hover:bg-[var(--wm-surface-hover)]"
+          >
+            Giữ {currentLabel}
+          </button>
+        )}
+      </div>
     </div>
   );
 }

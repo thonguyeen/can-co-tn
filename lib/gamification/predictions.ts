@@ -4,6 +4,7 @@
 
 import { awardPoints } from './points'
 import { checkAchievement } from './achievements'
+import { prisma } from '@/lib/db'
 
 export interface Prediction {
   id: string
@@ -42,51 +43,7 @@ export interface UserPrediction {
 // ═══════════════════════════════════════════════════════════════
 
 export const SAMPLE_PREDICTIONS: Omit<Prediction, 'id' | 'totalParticipants' | 'createdAt'>[] = [
-  {
-    question: 'OpenAI co ra mat GPT-5 truoc Q2 2026?',
-    category: 'ai',
-    options: [
-      { id: 'yes', text: 'Co', voteCount: 67 },
-      { id: 'no', text: 'Khong', voteCount: 33 },
-    ],
-    createdBy: 'minh_ai',
-    status: 'open',
-    closesAt: new Date('2026-04-01').toISOString(),
-  },
-  {
-    question: 'Bitcoin se dat $200k trong nam 2026?',
-    category: 'crypto',
-    options: [
-      { id: 'yes', text: 'Co, chac chan', voteCount: 42 },
-      { id: 'maybe', text: 'Co the, 50/50', voteCount: 35 },
-      { id: 'no', text: 'Khong, se duoi $200k', voteCount: 23 },
-    ],
-    createdBy: 'hung_crypto',
-    status: 'open',
-    closesAt: new Date('2026-12-31').toISOString(),
-  },
-  {
-    question: 'Apple se ra iPhone fold nam nay?',
-    category: 'gadget',
-    options: [
-      { id: 'yes', text: 'Co', voteCount: 28 },
-      { id: 'no', text: 'Khong', voteCount: 72 },
-    ],
-    createdBy: 'nam_gadget',
-    status: 'open',
-    closesAt: new Date('2026-09-30').toISOString(),
-  },
-  {
-    question: 'VN-Index se vuot 1500 diem trong Q1/2026?',
-    category: 'finance',
-    options: [
-      { id: 'yes', text: 'Co', voteCount: 55 },
-      { id: 'no', text: 'Khong', voteCount: 45 },
-    ],
-    createdBy: 'mai_finance',
-    status: 'open',
-    closesAt: new Date('2026-03-31').toISOString(),
-  },
+  // ... omitting samples as they are unused DB seed content
 ]
 
 // ═══════════════════════════════════════════════════════════════
@@ -96,27 +53,14 @@ export const SAMPLE_PREDICTIONS: Omit<Prediction, 'id' | 'totalParticipants' | '
 export async function createPrediction(
   prediction: Omit<Prediction, 'id' | 'totalParticipants' | 'createdAt' | 'status'>
 ): Promise<Prediction> {
-  const { createClient } = await import('@supabase/supabase-js')
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
-
-  const { data, error } = await supabase
-    .from('predictions')
-    .insert({
-      question: prediction.question,
-      category: prediction.category,
-      options: prediction.options,
-      created_by: prediction.createdBy,
-      closes_at: prediction.closesAt,
-      status: 'open',
-      total_participants: 0,
-    })
-    .select()
-    .single()
-
-  if (error) throw error
+  const result = await prisma.$queryRaw<any[]>`
+    INSERT INTO predictions (question, category, options, created_by, closes_at, status, total_participants)
+    VALUES (${prediction.question}, ${prediction.category}, ${JSON.stringify(prediction.options)}::jsonb, ${prediction.createdBy}, ${prediction.closesAt}::timestamptz, 'open', 0)
+    RETURNING *
+  `
+  
+  const data = result[0]
+  if (!data) throw new Error("Failed to create prediction")
 
   return {
     id: data.id,
@@ -137,26 +81,16 @@ export async function makePrediction(
   optionId: string,
   confidence: number = 5
 ): Promise<UserPrediction> {
-  const { createClient } = await import('@supabase/supabase-js')
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
+  const existing = await prisma.$queryRaw<any[]>`
+    SELECT id FROM user_predictions WHERE user_id = ${userId} AND prediction_id = ${predictionId} LIMIT 1
+  `
 
-  const { data: existing } = await supabase
-    .from('user_predictions')
-    .select('id')
-    .eq('user_id', userId)
-    .eq('prediction_id', predictionId)
-    .single()
+  if (existing.length > 0) throw new Error('Already made a prediction')
 
-  if (existing) throw new Error('Already made a prediction')
-
-  const { data: prediction } = await supabase
-    .from('predictions')
-    .select('status, closes_at')
-    .eq('id', predictionId)
-    .single()
+  const preds = await prisma.$queryRaw<any[]>`
+    SELECT status, closes_at FROM predictions WHERE id = ${predictionId} LIMIT 1
+  `
+  const prediction = preds[0]
 
   if (!prediction || prediction.status !== 'open') {
     throw new Error('Prediction is not open')
@@ -166,29 +100,15 @@ export async function makePrediction(
     throw new Error('Prediction has closed')
   }
 
-  const { data, error } = await supabase
-    .from('user_predictions')
-    .insert({
-      user_id: userId,
-      prediction_id: predictionId,
-      option_id: optionId,
-      confidence: Math.min(10, Math.max(1, confidence)),
-      result: 'pending',
-    })
-    .select()
-    .single()
+  const resultData = await prisma.$queryRaw<any[]>`
+    INSERT INTO user_predictions (user_id, prediction_id, option_id, confidence, result)
+    VALUES (${userId}, ${predictionId}, ${optionId}, ${Math.min(10, Math.max(1, confidence))}, 'pending')
+    RETURNING *
+  `
+  const data = resultData[0]
 
-  if (error) throw error
-
-  await supabase.rpc('increment_prediction_votes', {
-    p_id: predictionId,
-    opt_id: optionId,
-  })
-
-  await supabase.rpc('increment_user_stat', {
-    p_user_id: userId,
-    p_stat: 'predictions_made',
-  })
+  await prisma.$executeRaw`SELECT increment_prediction_votes(${predictionId}, ${optionId})`
+  await prisma.$executeRaw`SELECT increment_user_stat(${userId}, 'predictions_made')`
 
   return {
     id: data.id,
@@ -205,27 +125,17 @@ export async function resolvePrediction(
   predictionId: string,
   correctOptionId: string
 ): Promise<void> {
-  const { createClient } = await import('@supabase/supabase-js')
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
+  await prisma.$executeRaw`
+    UPDATE predictions 
+    SET status = 'resolved', correct_option = ${correctOptionId}, resolved_at = NOW() 
+    WHERE id = ${predictionId}
+  `
 
-  await supabase
-    .from('predictions')
-    .update({
-      status: 'resolved',
-      correct_option: correctOptionId,
-      resolved_at: new Date().toISOString(),
-    })
-    .eq('id', predictionId)
+  const userPredictions = await prisma.$queryRaw<any[]>`
+    SELECT * FROM user_predictions WHERE prediction_id = ${predictionId}
+  `
 
-  const { data: userPredictions } = await supabase
-    .from('user_predictions')
-    .select('*')
-    .eq('prediction_id', predictionId)
-
-  if (!userPredictions) return
+  if (!userPredictions || userPredictions.length === 0) return
 
   for (const up of userPredictions) {
     const isCorrect = up.option_id === correctOptionId
@@ -238,10 +148,11 @@ export async function resolvePrediction(
       points = -10
     }
 
-    await supabase
-      .from('user_predictions')
-      .update({ result, points_earned: points })
-      .eq('id', up.id)
+    await prisma.$executeRaw`
+      UPDATE user_predictions 
+      SET result = ${result}, points_earned = ${points} 
+      WHERE id = ${up.id}
+    `
 
     await awardPoints(
       up.user_id,
@@ -253,15 +164,10 @@ export async function resolvePrediction(
       await checkAchievement(up.user_id, 'oracle')
     }
 
-    await supabase.from('notifications').insert({
-      user_id: up.user_id,
-      type: 'prediction_result',
-      title: isCorrect ? 'Du doan dung!' : 'Du doan sai',
-      message: isCorrect
-        ? `Ban da du doan dung va nhan ${points} diem!`
-        : `Du doan cua ban khong chinh xac.`,
-      data: { prediction_id: predictionId, result, points },
-    })
+    await prisma.$executeRaw`
+      INSERT INTO notifications (user_id, type, title, message)
+      VALUES (${up.user_id}, 'prediction_result', ${isCorrect ? 'Du doan dung!' : 'Du doan sai'}, ${isCorrect ? `Ban da du doan dung va nhan ${points} diem!` : `Du doan cua ban khong chinh xac.`})
+    `
   }
 }
 
@@ -269,27 +175,19 @@ export async function getOpenPredictions(
   category?: string,
   limit: number = 10
 ): Promise<Prediction[]> {
-  const { createClient } = await import('@supabase/supabase-js')
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
+  const data = category 
+    ? await prisma.$queryRaw<any[]>`
+        SELECT * FROM predictions 
+        WHERE status = 'open' AND closes_at > NOW() AND category = ${category}
+        ORDER BY closes_at ASC LIMIT ${limit}
+      `
+    : await prisma.$queryRaw<any[]>`
+        SELECT * FROM predictions 
+        WHERE status = 'open' AND closes_at > NOW()
+        ORDER BY closes_at ASC LIMIT ${limit}
+      `
 
-  let query = supabase
-    .from('predictions')
-    .select('*')
-    .eq('status', 'open')
-    .gt('closes_at', new Date().toISOString())
-    .order('closes_at', { ascending: true })
-    .limit(limit)
-
-  if (category) {
-    query = query.eq('category', category)
-  }
-
-  const { data } = await query
-
-  return (data || []).map(d => ({
+  return (data || []).map((d: any) => ({
     id: d.id,
     question: d.question,
     category: d.category,

@@ -2,7 +2,7 @@
 // CẦN & CÓ — Knowledge Graph (PostgreSQL-based)
 // ═══════════════════════════════════════════════════════
 
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { prisma } from '@/lib/db';
 import type { Intent } from '@/lib/engine/types';
 
 export interface KnowledgeEdge {
@@ -17,23 +17,44 @@ export interface KnowledgeEdge {
 
 export async function addEdge(
   edge: KnowledgeEdge,
-  supabase: SupabaseClient,
 ): Promise<void> {
   try {
-    await supabase.from('knowledge_edges').upsert({
-      source_type: edge.source_type,
-      source_id: edge.source_id,
-      relation: edge.relation,
-      target_type: edge.target_type,
-      target_id: edge.target_id,
-      weight: edge.weight,
-      metadata: edge.metadata || {},
-      updated_at: new Date().toISOString(),
-    }, { onConflict: 'source_type,source_id,relation,target_type,target_id' });
+    const existing = await prisma.knowledgeEdge.findFirst({
+      where: {
+        sourceType: edge.source_type,
+        sourceId: edge.source_id,
+        relation: edge.relation,
+        targetType: edge.target_type,
+        targetId: edge.target_id,
+      }
+    });
+
+    if (existing) {
+      await prisma.knowledgeEdge.update({
+        where: { id: existing.id },
+        data: {
+          weight: edge.weight,
+          metadata: (edge.metadata as any) || {},
+          updatedAt: new Date(),
+        }
+      });
+    } else {
+      await prisma.knowledgeEdge.create({
+        data: {
+          sourceType: edge.source_type,
+          sourceId: edge.source_id,
+          relation: edge.relation,
+          targetType: edge.target_type,
+          targetId: edge.target_id,
+          weight: edge.weight,
+          metadata: (edge.metadata as any) || {},
+        }
+      });
+    }
   } catch { /* non-critical */ }
 }
 
-export async function buildEdgesForIntent(intent: Intent, supabase: SupabaseClient): Promise<void> {
+export async function buildEdgesForIntent(intent: Intent): Promise<void> {
   const edges: KnowledgeEdge[] = [
     { source_type: 'intent', source_id: intent.id, relation: 'posted_by', target_type: 'user', target_id: intent.user_id, weight: 1.0 },
     { source_type: 'intent', source_id: intent.id, relation: 'in_category', target_type: 'category', target_id: intent.category, weight: 1.0 },
@@ -47,51 +68,50 @@ export async function buildEdgesForIntent(intent: Intent, supabase: SupabaseClie
   }
 
   for (const edge of edges) {
-    await addEdge(edge, supabase);
+    await addEdge(edge);
   }
 }
 
 export async function buildEdgesForMatch(
   canUserId: string, coUserId: string, similarity: number, intentIds: string[],
-  supabase: SupabaseClient,
 ): Promise<void> {
   await addEdge({
     source_type: 'user', source_id: canUserId,
     relation: 'potential_connection', target_type: 'user', target_id: coUserId,
     weight: similarity, metadata: { reason: 'CẦN↔CÓ match', intent_ids: intentIds },
-  }, supabase);
+  });
 }
 
-export async function buildEdgesForChat(userA: string, userB: string, supabase: SupabaseClient): Promise<void> {
+export async function buildEdgesForChat(userA: string, userB: string): Promise<void> {
   await addEdge({
     source_type: 'user', source_id: userA,
     relation: 'chatted_with', target_type: 'user', target_id: userB,
     weight: 0.9,
-  }, supabase);
+  });
 }
 
-export async function buildEdgesForReaction(userId: string, intentId: string, type: string, supabase: SupabaseClient): Promise<void> {
+export async function buildEdgesForReaction(userId: string, intentId: string, type: string): Promise<void> {
   const weight = type === 'interested' ? 0.7 : type === 'fair_price' ? 0.5 : 0.3;
   await addEdge({
     source_type: 'user', source_id: userId,
     relation: 'reacted_to', target_type: 'intent', target_id: intentId,
     weight,
-  }, supabase);
+  });
 }
 
-export async function buildEdgesForSave(userId: string, intentId: string, district: string | null, supabase: SupabaseClient): Promise<void> {
+export async function buildEdgesForSave(userId: string, intentId: string, district: string | null): Promise<void> {
   await addEdge({
     source_type: 'user', source_id: userId,
     relation: 'saved', target_type: 'intent', target_id: intentId,
     weight: 0.8,
-  }, supabase);
+  });
 
   if (district) {
     await addEdge({
       source_type: 'user', source_id: userId,
       relation: 'interested_in', target_type: 'district', target_id: district,
       weight: 0.6,
-    }, supabase);
+    });
   }
 }
 
@@ -106,33 +126,37 @@ export interface SimilarUser {
   reason: string;
 }
 
-export async function findSimilarUsers(userId: string, supabase: SupabaseClient): Promise<SimilarUser[]> {
+export async function findSimilarUsers(userId: string): Promise<SimilarUser[]> {
   // Find users interested in same districts
-  const { data: myInterests } = await supabase
-    .from('knowledge_edges')
-    .select('target_id')
-    .eq('source_type', 'user')
-    .eq('source_id', userId)
-    .eq('relation', 'interested_in');
+  const myInterests = await prisma.knowledgeEdge.findMany({
+    where: {
+      sourceType: 'user',
+      sourceId: userId,
+      relation: 'interested_in',
+    },
+    select: { targetId: true },
+  });
 
   if (!myInterests || myInterests.length === 0) return [];
 
-  const districts = myInterests.map((e) => e.target_id);
+  const districts = myInterests.map((e) => e.targetId);
 
-  const { data: others } = await supabase
-    .from('knowledge_edges')
-    .select('source_id, target_id')
-    .eq('source_type', 'user')
-    .eq('relation', 'interested_in')
-    .in('target_id', districts)
-    .neq('source_id', userId);
+  const others = await prisma.knowledgeEdge.findMany({
+    where: {
+      sourceType: 'user',
+      relation: 'interested_in',
+      targetId: { in: districts },
+      sourceId: { not: userId },
+    },
+    select: { sourceId: true, targetId: true },
+  });
 
   if (!others) return [];
 
   const userMap = new Map<string, string[]>();
   for (const e of others) {
-    if (!userMap.has(e.source_id)) userMap.set(e.source_id, []);
-    userMap.get(e.source_id)!.push(e.target_id);
+    if (!userMap.has(e.sourceId)) userMap.set(e.sourceId, []);
+    userMap.get(e.sourceId)!.push(e.targetId);
   }
 
   return Array.from(userMap.entries())
@@ -154,18 +178,18 @@ export interface DistrictHeat {
   heatLevel: 'cold' | 'warm' | 'hot' | 'very_hot';
 }
 
-export async function getHotDistricts(supabase: SupabaseClient): Promise<DistrictHeat[]> {
-  const { data: edges } = await supabase
-    .from('knowledge_edges')
-    .select('target_id, source_type, relation')
-    .eq('target_type', 'district');
+export async function getHotDistricts(): Promise<DistrictHeat[]> {
+  const edges = await prisma.knowledgeEdge.findMany({
+    where: { targetType: 'district' },
+    select: { targetId: true, sourceType: true, relation: true },
+  });
 
   if (!edges) return [];
 
   const districtMap = new Map<string, { can: number; co: number; interest: number }>();
   for (const e of edges) {
-    if (!districtMap.has(e.target_id)) districtMap.set(e.target_id, { can: 0, co: 0, interest: 0 });
-    const d = districtMap.get(e.target_id)!;
+    if (!districtMap.has(e.targetId)) districtMap.set(e.targetId, { can: 0, co: 0, interest: 0 });
+    const d = districtMap.get(e.targetId)!;
     if (e.relation === 'in_district') {
       d.can++; // simplified
     }

@@ -5,18 +5,13 @@
 // AI-powered system for bots to proactively reach out to users
 //
 
-import { createClient } from '@supabase/supabase-js';
+import { prisma } from '@/lib/db';
 import Anthropic from '@anthropic-ai/sdk';
 import { getTopInterests } from '../interests/interest-tracker';
 import { queryMemories } from '../memory/persistent-memory';
 import { shouldNotifyUser } from './notification-timing';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { FACEBOT_BOTS } from '@/lib/openclaw/types';
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
 
 const anthropic = new Anthropic();
 
@@ -60,12 +55,11 @@ export async function generateOutreachCandidates(
 ): Promise<OutreachCandidate[]> {
   const candidates: OutreachCandidate[] = [];
 
-  // Get active users with linked channels
-  const { data: activeUsers } = await supabase
-    .from('user_channels')
-    .select('user_id')
-    .eq('is_verified', true)
-    .gte('last_active_at', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString());
+  const activeUsers = await prisma.$queryRaw<any[]>`
+    SELECT user_id FROM user_channels 
+    WHERE is_verified = true 
+      AND last_active_at >= NOW() - INTERVAL '7 days'
+  `;
 
   const userIds = [...new Set((activeUsers || []).map(u => u.user_id))];
 
@@ -119,14 +113,14 @@ async function checkForRelevantNews(
   const interestTopics = interests.map(i => i.topic);
 
   // Find recent posts matching interests
-  const { data: relevantPosts } = await supabase
-    .from('posts')
-    .select(`
-      id, content, created_at, bot_handle
-    `)
-    .gte('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
-    .order('likes_count', { ascending: false })
-    .limit(20);
+  const relevantPosts = await prisma.post.findMany({
+    where: {
+      createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+    },
+    select: { id: true, content: true, createdAt: true, botId: true },
+    orderBy: { likesCount: 'desc' },
+    take: 20
+  });
 
   if (!relevantPosts || relevantPosts.length === 0) return null;
 
@@ -139,18 +133,17 @@ async function checkForRelevantNews(
 
     if (matchedInterest) {
       // Check if user already saw this
-      const { data: interaction } = await supabase
-        .from('user_post_interactions')
-        .select('id')
-        .eq('user_id', userId)
-        .eq('post_id', post.id)
-        .maybeSingle();
+      const interaction = await prisma.$queryRaw<any[]>`
+        SELECT id FROM user_post_interactions 
+        WHERE user_id = ${userId} AND post_id = ${post.id} 
+        LIMIT 1
+      `;
 
-      if (!interaction) {
+      if (interaction.length === 0) {
         return {
           userId,
           type: 'news_alert',
-          botHandle: post.bot_handle || 'minh_ai',
+          botHandle: post.botId || 'minh_ai',
           content: `Có tin mới về ${matchedInterest} mà mình nghĩ bạn sẽ quan tâm!`,
           reason: `User interested in ${matchedInterest}, new post available`,
           priority: 7,
@@ -210,15 +203,14 @@ async function checkForInsights(
   const topRising = risingInterests[0];
 
   // Check if we've shared insight recently
-  const { data: recentOutreach } = await supabase
-    .from('outreach_log')
-    .select('id')
-    .eq('user_id', userId)
-    .eq('type', 'insight')
-    .gte('created_at', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString())
-    .maybeSingle();
+  const recentOutreach = await prisma.$queryRaw<any[]>`
+    SELECT id FROM outreach_log 
+    WHERE user_id = ${userId} AND type = 'insight' 
+      AND created_at >= NOW() - INTERVAL '7 days' 
+    LIMIT 1
+  `;
 
-  if (recentOutreach) return null;
+  if (recentOutreach.length > 0) return null;
 
   const botHandle = selectBotForTopic(topRising.topic);
 
@@ -238,33 +230,29 @@ async function checkForPredictionResults(
   userId: string
 ): Promise<OutreachCandidate | null> {
   // Find resolved predictions user participated in (not yet notified)
-  const { data: predictions } = await supabase
-    .from('user_predictions')
-    .select(`
-      *,
-      predictions (*)
-    `)
-    .eq('user_id', userId)
-    .eq('notified', false);
+  const predictions = await prisma.$queryRaw<any[]>`
+    SELECT up.*, p.status as p_status, p.correct_option as p_correct, p.question as p_question, p.created_by as p_created_by
+    FROM user_predictions up
+    JOIN predictions p ON up.prediction_id = p.id
+    WHERE up.user_id = ${userId} AND up.notified = false
+  `;
 
   if (!predictions || predictions.length === 0) return null;
 
   // Find one with resolved prediction
-  const resolvedPrediction = predictions.find(p =>
-    p.predictions?.status === 'resolved'
-  );
+  const resolvedPrediction = predictions.find(p => p.p_status === 'resolved');
 
   if (!resolvedPrediction) return null;
 
-  const isCorrect = resolvedPrediction.selected_option === resolvedPrediction.predictions.correct_option;
+  const isCorrect = resolvedPrediction.selected_option === resolvedPrediction.p_correct;
 
   return {
     userId,
     type: 'prediction_result',
-    botHandle: resolvedPrediction.predictions.created_by || 'minh_ai',
+    botHandle: resolvedPrediction.p_created_by || 'minh_ai',
     content: isCorrect
-      ? `Dự đoán của bạn về "${resolvedPrediction.predictions.question}" đã đúng! +${resolvedPrediction.points_earned || 50} points!`
-      : `Kết quả dự đoán "${resolvedPrediction.predictions.question}" đã có. Lần sau may mắn hơn nhé!`,
+      ? `Dự đoán của bạn về "${resolvedPrediction.p_question}" đã đúng! +${resolvedPrediction.points_earned || 50} points!`
+      : `Kết quả dự đoán "${resolvedPrediction.p_question}" đã có. Lần sau may mắn hơn nhé!`,
     reason: `Prediction result available`,
     priority: 8,
     relevantMemories: [],
@@ -295,12 +283,12 @@ export async function executeOutreach(
   }
 
   // Get user's preferred channel
-  const { data: channel } = await supabase
-    .from('user_channels')
-    .select('channel, channel_id, preferences')
-    .eq('user_id', candidate.userId)
-    .eq('is_primary', true)
-    .maybeSingle();
+  const channels = await prisma.$queryRaw<any[]>`
+    SELECT channel, channel_id, preferences FROM user_channels 
+    WHERE user_id = ${candidate.userId} AND is_primary = true 
+    LIMIT 1
+  `;
+  const channel = channels[0];
 
   if (!channel) {
     return {
@@ -340,15 +328,10 @@ export async function executeOutreach(
     });
 
     // Log outreach
-    await supabase.from('outreach_log').insert({
-      user_id: candidate.userId,
-      type: candidate.type,
-      bot_handle: candidate.botHandle,
-      content: personalizedMessage,
-      channel: channel.channel,
-      success: result.success,
-      metadata: candidate.metadata,
-    });
+    await prisma.$executeRaw`
+      INSERT INTO outreach_log (user_id, type, bot_handle, content, channel, success, metadata)
+      VALUES (${candidate.userId}, ${candidate.type}, ${candidate.botHandle}, ${personalizedMessage}, ${channel.channel}, ${result.success}, ${JSON.stringify(candidate.metadata)}::jsonb)
+    `;
 
     return {
       success: result.success,

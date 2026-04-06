@@ -268,7 +268,7 @@ export async function chatConversation(
     const openai = getOpenAIClient();
 
     const response = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
       max_tokens: options?.maxTokens || 2048,
       temperature: options?.temperature || 0.3,
       messages: messages.map((m) => ({

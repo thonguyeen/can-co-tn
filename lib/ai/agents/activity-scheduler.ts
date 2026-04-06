@@ -6,6 +6,7 @@ import { BOT_PERSONAS, getActiveBots } from '../prompts/bot-personas'
 import { generateProactivePost, saveProactivePost, ProactivePostType } from './proactive-poster'
 import { initiateDebate, DEBATE_TOPICS } from './debate-engine'
 import { generateInteraction, shouldBotInteract, generateQuotePost } from './bot-interactions'
+import { prisma } from '@/lib/db'
 
 export interface ScheduledActivity {
   type: 'proactive_post' | 'debate' | 'interaction' | 'quote'
@@ -126,24 +127,17 @@ async function executeDebate(): Promise<void> {
 async function executeInteraction(botHandle: string): Promise<boolean> {
   const bot = BOT_PERSONAS[botHandle]
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-  if (!supabaseUrl || !supabaseKey) return false
-
-  const { createClient } = await import('@supabase/supabase-js')
-  const supabase = createClient(supabaseUrl, supabaseKey)
-
-  const { data: recentPosts } = await supabase
-    .from('posts')
-    .select(`id, content, bot_id, bots (handle)`)
-    .neq('bot_id', bot.id)
-    .order('created_at', { ascending: false })
-    .limit(10)
+  const recentPosts = await prisma.post.findMany({
+    where: { botId: { not: bot.id } },
+    select: { id: true, content: true, botId: true, bot: { select: { handle: true } } },
+    orderBy: { createdAt: 'desc' },
+    take: 10
+  })
 
   if (!recentPosts || recentPosts.length === 0) return false
 
   for (const post of recentPosts) {
-    const postBotHandle = (post.bots as any)?.handle
+    const postBotHandle = post.bot?.handle
     if (!postBotHandle) continue
 
     const decision = shouldBotInteract(postBotHandle, botHandle, post.content)
@@ -152,16 +146,18 @@ async function executeInteraction(botHandle: string): Promise<boolean> {
       const result = await generateInteraction({
         postId: post.id,
         postContent: post.content,
-        postBotId: post.bot_id,
+        postBotId: post.botId,
         postBotHandle: postBotHandle,
         interactingBotHandle: botHandle,
         interactionType: decision.type,
       })
 
-      await supabase.from('comments').insert({
-        content: result.content,
-        post_id: post.id,
-        bot_id: bot.id,
+      await prisma.comment.create({
+        data: {
+          content: result.content,
+          postId: post.id,
+          botId: bot.id,
+        }
       })
 
       return true
@@ -174,20 +170,12 @@ async function executeInteraction(botHandle: string): Promise<boolean> {
 async function executeQuotePost(botHandle: string): Promise<boolean> {
   const bot = BOT_PERSONAS[botHandle]
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-  if (!supabaseUrl || !supabaseKey) return false
-
-  const { createClient } = await import('@supabase/supabase-js')
-  const supabase = createClient(supabaseUrl, supabaseKey)
-
-  const { data: popularPosts } = await supabase
-    .from('posts')
-    .select('id, bot_id')
-    .neq('bot_id', bot.id)
-    .gte('likes_count', 5)
-    .order('likes_count', { ascending: false })
-    .limit(5)
+  const popularPosts = await prisma.post.findMany({
+    where: { botId: { not: bot.id }, likesCount: { gte: 5 } },
+    select: { id: true, botId: true },
+    orderBy: { likesCount: 'desc' },
+    take: 5
+  })
 
   if (!popularPosts || popularPosts.length === 0) return false
 

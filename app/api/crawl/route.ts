@@ -5,16 +5,10 @@ import {
 } from '@/lib/crawler/crawler-manager'
 import { crawlAllSources, crawlPlatform } from '@/lib/crawlers/unified-crawler'
 import { SourcePlatform } from '@/lib/crawlers/source-registry'
-import { createClient } from '@supabase/supabase-js'
+import { prisma } from '@/lib/db'
+import { toSnakeCase } from '@/lib/data/helpers'
 
 export const maxDuration = 300 // 5 minutes timeout
-
-function getSupabaseAdmin() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
-}
 
 export async function POST(req: NextRequest) {
   try {
@@ -97,27 +91,22 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // Otherwise return status
-  const supabase = getSupabaseAdmin()
+  // Otherwise return status — migrate from supabase to prisma
+  const logs = await prisma.crawlLog.findMany({
+    include: {
+      source: { select: { name: true } },
+    },
+    orderBy: { startedAt: 'desc' },
+    take: 50,
+  })
 
-  const { data: logs } = await supabase
-    .from('crawl_logs')
-    .select(
-      `
-      *,
-      sources (name)
-    `
-    )
-    .order('started_at', { ascending: false })
-    .limit(50)
-
-  const { data: sources } = await supabase
-    .from('sources')
-    .select('id, name, last_crawled_at, is_active')
-    .order('name')
+  const sources = await prisma.source.findMany({
+    select: { id: true, name: true, lastCrawledAt: true, isActive: true },
+    orderBy: { name: 'asc' },
+  })
 
   return NextResponse.json({
-    recent_logs: logs,
-    sources,
+    recent_logs: toSnakeCase(logs),
+    sources: toSnakeCase(sources),
   })
 }

@@ -5,15 +5,10 @@
 // Handles direct conversations with FACEBOT bots via chat
 //
 
-import { createClient } from '@supabase/supabase-js';
+import { prisma } from '@/lib/db';
 import { CommandContext, CommandResult } from './message-handler';
 import { CanvasCard, FACEBOT_BOTS, BotPersona } from './types';
 import { generateBotResponse } from './anthropic-direct';
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
 
 // Conversation history (in-memory cache)
 const conversationHistory: Map<string, { botHandle: string; messages: ConversationMessage[] }[]> = new Map();
@@ -270,13 +265,17 @@ function saveToHistory(
 
 async function awardBotInteractionPoints(userId: string, botHandle: string): Promise<void> {
   try {
-    // Small point award for interaction
-    await supabase.from('point_transactions').insert({
-      user_id: userId,
-      action: 'bot_chat',
-      points: 2,
-      metadata: { bot_handle: botHandle, source: 'openclaw' },
+    // TODO: Restore when pointTransaction table is added
+    /*
+    await prisma.pointTransaction.create({
+      data: {
+        userId: userId,
+        action: 'bot_chat',
+        points: 2,
+        metadata: { bot_handle: botHandle, source: 'openclaw' } as any,
+      }
     });
+    */
   } catch (error) {
     console.error('Failed to award points:', error);
   }

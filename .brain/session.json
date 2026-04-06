@@ -1,0 +1,44 @@
+{
+  "updated_at": "2026-04-03T13:10:00+07:00",
+  "working_on": {
+    "feature": "Postgres & NextAuth Migration",
+    "task": "Phase 02: NextAuth Migration",
+    "status": "completed",
+    "files": [
+      "lib/auth.ts",
+      "app/api/auth/[...nextauth]/route.ts",
+      "app/(auth)/login/page.tsx",
+      "app/(auth)/register/page.tsx",
+      "app/actions/auth.ts",
+      "middleware.ts"
+    ],
+    "blockers": [],
+    "notes": "Đã cắt bỏ hoàn toàn Supabase Client ra khỏi quy trình Auth. Sử dụng NextAuth SignIn và Server Action để Hash mật khẩu với Bcrypt."
+  },
+  "pending_tasks": [
+    {
+      "task": "Phase 03: API & Data Access Rewrite",
+      "priority": "high",
+      "notes": "Tiến hành lùng sục và thay thế toàn bộ lệnh supabase.from() bằng prisma.* trong các API/Server Components."
+    }
+  ],
+  "recent_changes": [
+    {
+      "timestamp": "2026-04-03T13:00:00+07:00",
+      "type": "auth_setup",
+      "description": "Cài đặt NextAuth, đổi logic trang Login/Register và cấu hình Middleware NextAuth bảo mật chặt cổng /api/",
+      "files": [
+        "middleware.ts",
+        "lib/auth.ts",
+        "app/actions/auth.ts"
+      ]
+    }
+  ],
+  "errors_encountered": [],
+  "decisions_made": [
+    {
+      "decision": "Dùng Server Action trực tiếp cho hàm Register",
+      "reason": "NextAuth Credentials không cung cấp sẵn Route Đăng ký, Server Actions gọn gàng hơn là viết 1 file API riêng."
+    }
+  ]
+}

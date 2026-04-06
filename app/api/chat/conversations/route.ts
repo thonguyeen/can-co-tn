@@ -1,92 +1,108 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { getAuthUserId } from '@/lib/data/get-user';
+import { prisma } from '@/lib/db';
+import { toSnakeCase } from '@/lib/data/helpers';
 
 // GET /api/chat/conversations — list user's conversations with preview
-export async function GET(_request: NextRequest) {
-  const supabase = await createClient();
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
+export async function GET(request: NextRequest) {
+  const userId = await getAuthUserId(request);
+  if (!userId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
   // Fetch conversations where user is participant
-  const { data: conversations, error } = await supabase
-    .from('conversations')
-    .select('*, intent:intents(id, title, type, raw_text)')
-    .or(`user_a.eq.${user.id},user_b.eq.${user.id}`)
-    .order('last_message_at', { ascending: false, nullsFirst: false });
+  const conversations = await prisma.conversation.findMany({
+    where: {
+      OR: [{ userA: userId }, { userB: userId }],
+    },
+    include: {
+      intent: {
+        select: { id: true, title: true, type: true, rawText: true },
+      },
+    },
+    orderBy: { lastMessageAt: { sort: 'desc', nulls: 'last' } },
+  });
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
-
-  if (!conversations || conversations.length === 0) {
+  if (conversations.length === 0) {
     return NextResponse.json([]);
   }
 
-  // Batch fetch: other party profiles + last message + unread count
-  const otherUserIds = conversations.map((c) =>
-    c.user_a === user.id ? c.user_b : c.user_a,
-  );
+  // Collect IDs for batch fetch
+  const otherUserIds = [...new Set(
+    conversations.map((c) => (c.userA === userId ? c.userB : c.userA))
+  )];
   const convIds = conversations.map((c) => c.id);
 
-  const [profilesRes, messagesRes] = await Promise.all([
-    supabase
-      .from('profiles')
-      .select('id, display_name, avatar_url')
-      .in('id', [...new Set(otherUserIds)]),
-    // Get latest message per conversation
-    supabase
-      .from('messages')
-      .select('conversation_id, content, created_at, sender_id')
-      .in('conversation_id', convIds)
-      .order('created_at', { ascending: false }),
+  // Batch fetch: profiles + all messages for these conversations
+  const [profiles, messages, unreadMessages] = await Promise.all([
+    prisma.profile.findMany({
+      where: { id: { in: otherUserIds } },
+      select: { id: true, displayName: true, avatarUrl: true },
+    }),
+    // Get all messages ordered desc to pick latest per conversation
+    prisma.message.findMany({
+      where: { conversationId: { in: convIds } },
+      orderBy: { createdAt: 'desc' },
+      select: { conversationId: true, content: true, createdAt: true, senderId: true },
+    }),
+    // Count unread messages
+    prisma.message.findMany({
+      where: {
+        conversationId: { in: convIds },
+        senderId: { not: userId },
+        readAt: null,
+      },
+      select: { conversationId: true },
+    }),
   ]);
 
-  const profileMap = new Map(
-    (profilesRes.data || []).map((p) => [p.id, p]),
-  );
+  const profileMap = new Map(profiles.map((p) => [p.id, p]));
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const lastMessageMap = new Map<string, any>();
-  for (const msg of messagesRes.data || []) {
-    if (!lastMessageMap.has(msg.conversation_id)) {
-      lastMessageMap.set(msg.conversation_id, msg);
+  for (const msg of messages) {
+    if (!lastMessageMap.has(msg.conversationId)) {
+      lastMessageMap.set(msg.conversationId, msg);
     }
   }
 
-  // Count unread per conversation
-  const { data: unreadData } = await supabase
-    .from('messages')
-    .select('conversation_id')
-    .in('conversation_id', convIds)
-    .neq('sender_id', user.id)
-    .is('read_at', null);
-
   const unreadMap = new Map<string, number>();
-  for (const u of unreadData || []) {
-    unreadMap.set(u.conversation_id, (unreadMap.get(u.conversation_id) || 0) + 1);
+  for (const u of unreadMessages) {
+    unreadMap.set(u.conversationId, (unreadMap.get(u.conversationId) || 0) + 1);
   }
 
   const enriched = conversations.map((conv) => {
-    const otherUserId = conv.user_a === user.id ? conv.user_b : conv.user_a;
+    const otherUserId = conv.userA === userId ? conv.userB : conv.userA;
     const profile = profileMap.get(otherUserId);
     const lastMessage = lastMessageMap.get(conv.id);
 
     return {
       id: conv.id,
-      intent_id: conv.intent_id,
-      intent: conv.intent,
+      intent_id: conv.intentId,
+      intent: conv.intent
+        ? {
+            id: conv.intent.id,
+            title: conv.intent.title,
+            type: conv.intent.type,
+            raw_text: conv.intent.rawText,
+          }
+        : null,
       other_party: {
         id: otherUserId,
-        name: profile?.display_name || 'Người dùng',
-        avatar_url: profile?.avatar_url || null,
+        name: profile?.displayName || 'Người dùng',
+        avatar_url: profile?.avatarUrl || null,
       },
-      last_message: lastMessage || null,
+      last_message: lastMessage
+        ? {
+            conversation_id: lastMessage.conversationId,
+            content: lastMessage.content,
+            created_at: lastMessage.createdAt,
+            sender_id: lastMessage.senderId,
+          }
+        : null,
       unread_count: unreadMap.get(conv.id) || 0,
-      last_message_at: conv.last_message_at,
-      created_at: conv.created_at,
+      last_message_at: conv.lastMessageAt,
+      created_at: conv.createdAt,
     };
   });
 
@@ -95,10 +111,8 @@ export async function GET(_request: NextRequest) {
 
 // POST /api/chat/conversations — create or find conversation
 export async function POST(request: NextRequest) {
-  const supabase = await createClient();
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
+  const userId = await getAuthUserId(request);
+  if (!userId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
@@ -109,59 +123,73 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'other_user_id required' }, { status: 400 });
   }
 
-  if (other_user_id === user.id) {
+  if (other_user_id === userId) {
     return NextResponse.json({ error: 'Không thể chat với chính mình' }, { status: 400 });
   }
 
   // Check if conversation already exists (either direction)
-  const { data: existing } = await supabase
-    .from('conversations')
-    .select('*')
-    .or(`and(user_a.eq.${user.id},user_b.eq.${other_user_id}),and(user_a.eq.${other_user_id},user_b.eq.${user.id})`)
-    .eq('intent_id', intent_id || '')
-    .maybeSingle();
+  const existing = await prisma.conversation.findFirst({
+    where: {
+      OR: [
+        { userA: userId, userB: other_user_id, intentId: intent_id || null },
+        { userA: other_user_id, userB: userId, intentId: intent_id || null },
+      ],
+    },
+  });
 
   if (existing) {
-    return NextResponse.json(existing);
+    return NextResponse.json(toSnakeCase(existing));
   }
 
-  // Also check without intent_id constraint for general chat
+  // Also check with intent_id for specific intent-based chat
   if (intent_id) {
-    const { data: existingGeneral } = await supabase
-      .from('conversations')
-      .select('*')
-      .or(`and(user_a.eq.${user.id},user_b.eq.${other_user_id}),and(user_a.eq.${other_user_id},user_b.eq.${user.id})`)
-      .eq('intent_id', intent_id)
-      .maybeSingle();
+    const existingForIntent = await prisma.conversation.findFirst({
+      where: {
+        intentId: intent_id,
+        OR: [
+          { userA: userId, userB: other_user_id },
+          { userA: other_user_id, userB: userId },
+        ],
+      },
+    });
 
-    if (existingGeneral) {
-      return NextResponse.json(existingGeneral);
+    if (existingForIntent) {
+      return NextResponse.json(toSnakeCase(existingForIntent));
     }
   }
 
-  const { data, error } = await supabase
-    .from('conversations')
-    .insert({
-      intent_id: intent_id || null,
-      user_a: user.id,
-      user_b: other_user_id,
-    })
-    .select()
-    .single();
+  try {
+    const conversation = await prisma.conversation.create({
+      data: {
+        intentId: intent_id || null,
+        userA: userId,
+        userB: other_user_id,
+      },
+    });
 
-  if (error) {
-    // Unique constraint violated — conversation exists
-    if (error.code === '23505') {
-      const { data: found } = await supabase
-        .from('conversations')
-        .select('*')
-        .or(`and(user_a.eq.${user.id},user_b.eq.${other_user_id}),and(user_a.eq.${other_user_id},user_b.eq.${user.id})`)
-        .limit(1)
-        .single();
-      if (found) return NextResponse.json(found);
+    return NextResponse.json(toSnakeCase(conversation), { status: 201 });
+  } catch (error: unknown) {
+    // Unique constraint violated — conversation exists (race condition)
+    if (
+      error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      (error as { code: string }).code === 'P2002'
+    ) {
+      const found = await prisma.conversation.findFirst({
+        where: {
+          OR: [
+            { userA: userId, userB: other_user_id },
+            { userA: other_user_id, userB: userId },
+          ],
+        },
+      });
+      if (found) return NextResponse.json(toSnakeCase(found));
     }
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    console.error('Create conversation error:', error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Failed to create conversation' },
+      { status: 500 }
+    );
   }
-
-  return NextResponse.json(data, { status: 201 });
 }

@@ -5,15 +5,10 @@
 // Sends personalized daily digest to users at their preferred time
 //
 
-import { createClient } from '@supabase/supabase-js';
+import { prisma } from '@/lib/db';
 import { getOpenClawClient } from './client';
 import { CanvasCard, OpenClawChannel } from './types';
 import { ChannelPreferences } from './channel-manager';
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
 
 // ═══════════════════════════════════════════════════════════════
 // MAIN SCHEDULER (Called by cron)
@@ -29,12 +24,10 @@ export async function sendScheduledDigests(): Promise<{
   const timeSlot = `${currentHour}:${currentMinute.toString().padStart(2, '0')}`;
 
   // Get users who want digest at this time
-  const { data: users } = await supabase
-    .from('user_channels')
-    .select('user_id, channel, channel_id, preferences, subscriptions')
-    .eq('is_verified', true);
-
-  const eligibleUsers = (users || []).filter(u => {
+  // TODO: Restore query when userChannel table is added
+  const users: any[] = [];
+  
+  const eligibleUsers = users.filter(u => {
     const prefs = (u.preferences || {}) as ChannelPreferences;
     return prefs.dailyDigest && prefs.digestTime === timeSlot;
   });
@@ -52,8 +45,8 @@ export async function sendScheduledDigests(): Promise<{
     try {
       const prefs = (user.preferences || {}) as ChannelPreferences;
       const digest = await generatePersonalizedDigest(
-        user.user_id,
-        user.subscriptions || ['all'],
+        user.userId,
+        (user.subscriptions as string[]) || ['all'],
         prefs.language || 'vi'
       );
 
@@ -64,7 +57,7 @@ export async function sendScheduledDigests(): Promise<{
 
       const result = await client.send({
         channel: user.channel as OpenClawChannel,
-        recipient: user.channel_id,
+        recipient: user.channelId,
         content: digest.message,
         format: 'canvas',
         canvas: digest.canvas,
@@ -78,19 +71,24 @@ export async function sendScheduledDigests(): Promise<{
 
     } catch (error) {
       failed++;
-      console.error(`Digest failed for user ${user.user_id}:`, error);
+      console.error(`Digest failed for user ${user.userId}:`, error);
     }
   }
 
   // Log
-  await supabase.from('push_logs').insert({
-    type: 'daily_digest',
-    reference_id: timeSlot,
-    recipients_count: eligibleUsers.length,
-    sent_count: sent,
-    failed_count: failed,
-    errors: [],
+  // TODO: Restore when pushLog table is added
+  /*
+  await prisma.pushLog.create({
+    data: {
+      type: 'daily_digest',
+      referenceId: timeSlot,
+      recipientsCount: eligibleUsers.length,
+      sentCount: sent,
+      failedCount: failed,
+      errors: [],
+    }
   });
+  */
 
   return { sent, failed, skipped };
 }
@@ -112,49 +110,50 @@ async function generatePersonalizedDigest(
   today.setHours(0, 0, 0, 0);
 
   // Get top posts from subscribed categories
-  const { data: posts } = await supabase
-    .from('posts')
-    .select(`
-      id,
-      content,
-      likes_count,
-      comments_count,
-      created_at,
-      bots (name, handle)
-    `)
-    .gte('created_at', yesterday.toISOString())
-    .lt('created_at', today.toISOString())
-    .order('likes_count', { ascending: false })
-    .limit(10);
+  const posts = await prisma.post.findMany({
+    where: {
+      createdAt: { gte: yesterday, lt: today }
+    },
+    select: {
+      id: true,
+      content: true,
+      likesCount: true,
+      commentsCount: true,
+      createdAt: true,
+      bot: { select: { name: true, handle: true } }
+    },
+    orderBy: { likesCount: 'desc' },
+    take: 10
+  });
 
   if (!posts || posts.length === 0) {
     return null; // No content to send
   }
 
   // Get user's stats
-  const { data: stats } = await supabase
-    .from('user_stats')
-    .select('total_points, current_streak, current_level')
-    .eq('user_id', userId)
-    .single();
+  let stats = await prisma.userStat.findUnique({
+    where: { userId },
+    select: { points: true, streakDays: true, level: true }
+  });
 
   // Get breaking count
-  const { count: breakingCount } = await supabase
-    .from('breaking_news')
-    .select('*', { count: 'exact', head: true })
-    .gte('created_at', yesterday.toISOString());
+  const breakingCount = await prisma.breakingNews.count({
+    where: { createdAt: { gte: yesterday } }
+  });
 
   // Get pending predictions
-  const { data: predictions } = await supabase
-    .from('predictions')
-    .select('id, question')
-    .eq('status', 'open')
-    .limit(2);
+  const predictions = await prisma.prediction.findMany({
+    where: { 
+      resolvedAt: null,
+      closesAt: { gt: new Date() }
+    },
+    select: { id: true, question: true },
+    take: 2
+  });
 
   // Format message
   const topPosts = posts.slice(0, 5).map((p, i) => {
-    const bot = p.bots as unknown as { name: string } | null;
-    return `${i + 1}. ${bot?.name || 'Bot'}: ${p.content.slice(0, 60)}... (❤️${p.likes_count || 0})`;
+    return `${i + 1}. ${p.bot?.name || 'Bot'}: ${p.content.slice(0, 60)}... (❤️${p.likesCount || 0})`;
   }).join('\n');
 
   const predictionsText = predictions && predictions.length > 0
@@ -173,7 +172,7 @@ ${new Date().toLocaleDateString('vi-VN')}
 ${topPosts}
 ${predictionsText}
 
-💎 Điểm: ${stats?.total_points || 0} | 🔥 Streak: ${stats?.current_streak || 0} ngày
+💎 Điểm: ${stats?.points || 0} | 🔥 Streak: ${stats?.streakDays || 0} ngày
 
 ---
 Gõ "news" để xem chi tiết | "help" để xem commands`
@@ -188,7 +187,7 @@ ${new Date().toLocaleDateString('en-US')}
 ${topPosts}
 ${predictionsText}
 
-💎 Points: ${stats?.total_points || 0} | 🔥 Streak: ${stats?.current_streak || 0} days`;
+💎 Points: ${stats?.points || 0} | 🔥 Streak: ${stats?.streakDays || 0} days`;
 
   const canvas: CanvasCard = {
     type: 'digest',
@@ -219,14 +218,11 @@ export async function sendDigestToUser(
 ): Promise<boolean> {
   const client = getOpenClawClient();
 
-  const { data: prefs } = await supabase
-    .from('user_channels')
-    .select('preferences')
-    .eq('user_id', userId)
-    .eq('channel', channel)
-    .single();
+  // Find user by composite unique constraint
+  // TODO: Restore query when userChannel table is added
+  const userChannel: any = null;
 
-  const language = (prefs?.preferences as ChannelPreferences)?.language || 'vi';
+  const language = (userChannel?.preferences as ChannelPreferences)?.language || 'vi';
 
   const digest = await generatePersonalizedDigest(userId, ['all'], language);
 

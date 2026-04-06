@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { getAuthUserId } from '@/lib/data/get-user';
+import { prisma } from '@/lib/db';
+import { toSnakeCase } from '@/lib/data/helpers';
 
 // GET /api/chat/[id]/messages
 export async function GET(
@@ -7,10 +9,8 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const supabase = await createClient();
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
+  const userId = await getAuthUserId(request);
+  if (!userId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
@@ -18,33 +18,28 @@ export async function GET(
   const limit = parseInt(searchParams.get('limit') || '50');
   const before = searchParams.get('before');
 
-  let query = supabase
-    .from('messages')
-    .select('*')
-    .eq('conversation_id', id)
-    .order('created_at', { ascending: true })
-    .limit(limit);
+  const messages = await prisma.message.findMany({
+    where: {
+      conversationId: id,
+      ...(before ? { createdAt: { lt: new Date(before) } } : {}),
+    },
+    orderBy: { createdAt: 'asc' },
+    take: limit,
+  });
 
-  if (before) {
-    query = query.lt('created_at', before);
-  }
+  // Mark other person's messages as read (fire-and-forget side effect)
+  prisma.message
+    .updateMany({
+      where: {
+        conversationId: id,
+        senderId: { not: userId },
+        readAt: null,
+      },
+      data: { readAt: new Date() },
+    })
+    .catch(() => {});
 
-  const { data, error } = await query;
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
-
-  // Mark other person's messages as read (side effect)
-  supabase
-    .from('messages')
-    .update({ read_at: new Date().toISOString() })
-    .eq('conversation_id', id)
-    .neq('sender_id', user.id)
-    .is('read_at', null)
-    .then(() => {});
-
-  return NextResponse.json(data || []);
+  return NextResponse.json(toSnakeCase(messages));
 }
 
 // POST /api/chat/[id]/messages — send message
@@ -53,10 +48,8 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const supabase = await createClient();
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
+  const userId = await getAuthUserId(request);
+  if (!userId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
@@ -71,63 +64,56 @@ export async function POST(
   }
 
   // Insert message
-  const { data: message, error } = await supabase
-    .from('messages')
-    .insert({
-      conversation_id: id,
-      sender_id: user.id,
+  const message = await prisma.message.create({
+    data: {
+      conversationId: id,
+      senderId: userId,
       content: content.trim(),
-    })
-    .select()
-    .single();
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
+    },
+  });
 
   // Update conversation last_message_at
-  await supabase
-    .from('conversations')
-    .update({ last_message_at: new Date().toISOString() })
-    .eq('id', id);
+  await prisma.conversation.update({
+    where: { id },
+    data: { lastMessageAt: new Date() },
+  });
 
   // Create notification for recipient (fire-and-forget)
-  createMessageNotification(id, user.id, content.trim(), supabase).catch(() => {});
+  createMessageNotification(id, userId, content.trim()).catch(() => {});
 
-  return NextResponse.json(message, { status: 201 });
+  return NextResponse.json(toSnakeCase(message), { status: 201 });
 }
 
 async function createMessageNotification(
   conversationId: string,
   senderId: string,
   content: string,
-  supabase: Awaited<ReturnType<typeof createClient>>,
 ) {
   // Get conversation to find recipient
-  const { data: conv } = await supabase
-    .from('conversations')
-    .select('user_a, user_b')
-    .eq('id', conversationId)
-    .single();
+  const conv = await prisma.conversation.findUnique({
+    where: { id: conversationId },
+    select: { userA: true, userB: true },
+  });
 
   if (!conv) return;
 
-  const recipientId = conv.user_a === senderId ? conv.user_b : conv.user_a;
+  const recipientId = conv.userA === senderId ? conv.userB : conv.userA;
 
   // Get sender name
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('display_name')
-    .eq('id', senderId)
-    .single();
+  const profile = await prisma.profile.findUnique({
+    where: { id: senderId },
+    select: { displayName: true },
+  });
 
-  const senderName = profile?.display_name || 'Người dùng';
+  const senderName = profile?.displayName || 'Người dùng';
 
-  await supabase.from('notifications').insert({
-    user_id: recipientId,
-    type: 'new_message',
-    title: `Tin nhắn mới từ ${senderName}`,
-    message: content.slice(0, 100),
-    link: `/can-co/chat/${conversationId}`,
+  await prisma.notification.create({
+    data: {
+      userId: recipientId,
+      type: 'new_message',
+      title: `Tin nhắn mới từ ${senderName}`,
+      message: content.slice(0, 100),
+      link: `/can-co/chat/${conversationId}`,
+    },
   });
 }

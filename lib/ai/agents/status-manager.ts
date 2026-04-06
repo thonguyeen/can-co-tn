@@ -1,11 +1,4 @@
-import { createClient } from '@supabase/supabase-js'
-
-function getSupabaseAdmin() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
-}
+import { prisma } from '@/lib/db'
 
 type VerificationStatus = 'unverified' | 'partial' | 'verified' | 'debunked'
 
@@ -21,38 +14,37 @@ export async function updatePostStatus(
   newStatus: VerificationStatus,
   note: string
 ): Promise<StatusUpdate | null> {
-  const supabase = getSupabaseAdmin()
-
   // Get current status
-  const { data: post } = await supabase
-    .from('posts')
-    .select('verification_status')
-    .eq('id', postId)
-    .single()
+  const post = await prisma.post.findUnique({
+    where: { id: postId },
+    select: { verificationStatus: true }
+  })
 
   if (!post) return null
 
-  const oldStatus = post.verification_status as VerificationStatus
+  const oldStatus = (post.verificationStatus || 'unverified') as VerificationStatus
 
   // Skip if no change
   if (oldStatus === newStatus) return null
 
   // Update post
-  await supabase
-    .from('posts')
-    .update({
-      verification_status: newStatus,
-      verification_note: note,
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', postId)
+  await prisma.post.update({
+    where: { id: postId },
+    data: {
+      verificationStatus: newStatus,
+      verificationNote: note,
+      updatedAt: new Date(),
+    }
+  })
 
   // Record in post_updates (for history/timeline)
-  await supabase.from('post_updates').insert({
-    post_id: postId,
-    old_status: oldStatus,
-    new_status: newStatus,
-    note: note,
+  await prisma.postUpdate.create({
+    data: {
+      postId: postId,
+      oldStatus: oldStatus,
+      newStatus: newStatus,
+      note: note,
+    }
   })
 
   return {
@@ -64,32 +56,28 @@ export async function updatePostStatus(
 }
 
 export async function getPostVerificationHistory(postId: string) {
-  const supabase = getSupabaseAdmin()
+  const data = await prisma.postUpdate.findMany({
+    where: { postId: postId },
+    orderBy: { createdAt: 'desc' }
+  })
 
-  const { data } = await supabase
-    .from('post_updates')
-    .select('*')
-    .eq('post_id', postId)
-    .order('created_at', { ascending: false })
-
-  return data || []
+  return data
 }
 
 // Auto-update posts that have been unverified for too long
 export async function reviewStaleUnverifiedPosts() {
-  const supabase = getSupabaseAdmin()
   const STALE_HOURS = 24
+  const staleDate = new Date(Date.now() - STALE_HOURS * 60 * 60 * 1000)
 
-  const { data: stalePosts } = await supabase
-    .from('posts')
-    .select('id, created_at')
-    .eq('verification_status', 'unverified')
-    .lt(
-      'created_at',
-      new Date(Date.now() - STALE_HOURS * 60 * 60 * 1000).toISOString()
-    )
+  const stalePosts = await prisma.post.findMany({
+    where: {
+      verificationStatus: 'unverified',
+      createdAt: { lt: staleDate }
+    },
+    select: { id: true, createdAt: true }
+  })
 
-  if (!stalePosts) return
+  if (!stalePosts || stalePosts.length === 0) return
 
   for (const post of stalePosts) {
     // Mark as partial if still unverified after 24h

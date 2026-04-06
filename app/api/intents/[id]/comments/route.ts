@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { prisma } from '@/lib/db';
+import { requireAuth } from '@/lib/data/get-user';
 
 // GET /api/intents/[id]/comments
 export async function GET(
@@ -7,19 +8,25 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const supabase = await createClient();
 
-  const { data, error } = await supabase
-    .from('intent_comments')
-    .select('*')
-    .eq('intent_id', id)
-    .order('created_at', { ascending: true });
+  const data = await prisma.intentComment.findMany({
+    where: { intentId: id },
+    orderBy: { createdAt: 'asc' },
+  });
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
+  // Convert to snake_case for frontend
+  const response = data.map((c) => ({
+    id: c.id,
+    intent_id: c.intentId,
+    user_id: c.userId,
+    bot_name: c.botName,
+    content: c.content,
+    is_bot: c.isBot,
+    parent_id: c.parentId,
+    created_at: c.createdAt,
+  }));
 
-  return NextResponse.json(data || []);
+  return NextResponse.json(response);
 }
 
 // POST /api/intents/[id]/comments
@@ -28,12 +35,9 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const supabase = await createClient();
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const auth = await requireAuth(request);
+  if ('error' in auth) return auth.error;
+  const { userId } = auth;
 
   const body = await request.json();
   const { content, parent_id } = body;
@@ -42,34 +46,31 @@ export async function POST(
     return NextResponse.json({ error: 'content is required' }, { status: 400 });
   }
 
-  const { data, error } = await supabase
-    .from('intent_comments')
-    .insert({
-      intent_id: id,
-      user_id: user.id,
+  const data = await prisma.intentComment.create({
+    data: {
+      intentId: id,
+      userId,
       content,
-      parent_id: parent_id || null,
-      is_bot: false,
-    })
-    .select()
-    .single();
+      parentId: parent_id || null,
+      isBot: false,
+    },
+  });
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
+  // Increment comment count (atomic)
+  await prisma.intent.update({
+    where: { id },
+    data: { commentCount: { increment: 1 } },
+  });
 
-  // Increment comment count (best-effort)
-  const { data: currentIntent } = await supabase
-    .from('intents')
-    .select('comment_count')
-    .eq('id', id)
-    .single();
-  if (currentIntent) {
-    await supabase
-      .from('intents')
-      .update({ comment_count: (currentIntent.comment_count || 0) + 1 })
-      .eq('id', id);
-  }
-
-  return NextResponse.json(data, { status: 201 });
+  // Convert to snake_case for frontend
+  return NextResponse.json({
+    id: data.id,
+    intent_id: data.intentId,
+    user_id: data.userId,
+    bot_name: data.botName,
+    content: data.content,
+    is_bot: data.isBot,
+    parent_id: data.parentId,
+    created_at: data.createdAt,
+  }, { status: 201 });
 }

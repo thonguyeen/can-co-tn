@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { prisma } from '@/lib/db';
+import { requireAuth } from '@/lib/data/get-user';
+import { parseSearchIntent, formatIntentContent, isConfigured as isOpenAIConfigured } from '@/lib/engine/openai';
 import { generateIntentEmbedding } from '@/lib/engine/matching';
 import type { Intent } from '@/lib/engine/types';
 
@@ -9,57 +11,108 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const supabase = await createClient();
 
-  const { data, error } = await supabase
-    .from('intents')
-    .select('*, intent_images(*)')
-    .eq('id', id)
-    .single();
+  const data = await prisma.intent.findUnique({
+    where: { id },
+    include: { images: true },
+  });
 
-  if (error || !data) {
+  if (!data) {
     return NextResponse.json({ error: 'Không tìm thấy dữ liệu' }, { status: 404 });
   }
 
   // Fetch related data in parallel
-  const [profileRes, commentsRes] = await Promise.all([
-    supabase
-      .from('profiles')
-      .select('id, display_name, avatar_url')
-      .eq('id', data.user_id)
-      .single(),
-    supabase
-      .from('intent_comments')
-      .select('*, profiles:user_id(display_name)')
-      .eq('intent_id', id)
-      .order('created_at', { ascending: true }),
+  const [profile, comments] = await Promise.all([
+    data.userId
+      ? prisma.profile.findUnique({
+          where: { id: data.userId },
+          select: { id: true, displayName: true, avatarUrl: true },
+        })
+      : null,
+    prisma.intentComment.findMany({
+      where: { intentId: id },
+      orderBy: { createdAt: 'asc' },
+    }),
   ]);
 
   // Increment view count (best-effort)
-  supabase
-    .from('intents')
-    .update({ view_count: (data.view_count || 0) + 1 })
-    .eq('id', id)
-    .then(() => {});
+  prisma.intent.update({
+    where: { id },
+    data: { viewCount: { increment: 1 } },
+  }).catch(() => {});
 
-  const profile = profileRes.data;
-  const comments = (commentsRes.data || []).map((c) => ({
-    ...c,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    user: c.is_bot ? undefined : { name: (c as any).profiles?.display_name || 'Người dùng' },
+  // Resolve user names for human comments
+  const humanUserIds = [...new Set(comments.filter(c => !c.isBot && c.userId).map(c => c.userId!))];
+  const commentProfiles = humanUserIds.length > 0
+    ? await prisma.profile.findMany({
+        where: { id: { in: humanUserIds } },
+        select: { id: true, displayName: true },
+      })
+    : [];
+  const commentProfileMap = new Map(commentProfiles.map(p => [p.id, p]));
+
+  const commentsResponse = comments.map((c) => ({
+    id: c.id,
+    intent_id: c.intentId,
+    user_id: c.userId,
+    bot_name: c.botName,
+    content: c.content,
+    is_bot: c.isBot,
+    parent_id: c.parentId,
+    created_at: c.createdAt,
+    user: c.isBot ? undefined : { name: commentProfileMap.get(c.userId || '')?.displayName || 'Người dùng' },
+    profiles: c.isBot ? undefined : { display_name: commentProfileMap.get(c.userId || '')?.displayName || 'Người dùng' },
   }));
 
   return NextResponse.json({
-    ...data,
+    id: data.id,
+    user_id: data.userId,
+    type: data.type,
+    raw_text: data.rawText,
+    title: data.title,
+    parsed_data: data.parsedData,
+    category: data.category,
+    subcategory: data.subcategory,
+    price: data.price ? Number(data.price) : null,
+    price_min: data.priceMin ? Number(data.priceMin) : null,
+    price_max: data.priceMax ? Number(data.priceMax) : null,
+    address: data.address,
+    district: data.district,
+    ward: data.ward,
+    city: data.city,
+    trust_score: data.trustScore,
+    verification_level: data.verificationLevel,
+    comment_count: data.commentCount,
+    match_count: data.matchCount,
+    view_count: data.viewCount,
+    status: data.status,
+    is_bot: data.isBot,
+    bot_handle: data.botHandle,
+    source_url: data.sourceUrl,
+    created_at: data.createdAt,
+    updated_at: data.updatedAt,
     user: {
-      id: data.user_id,
-      name: profile?.display_name || 'Người dùng',
-      avatar_url: profile?.avatar_url || null,
-      trust_score: data.trust_score,
-      verification_level: data.verification_level,
+      id: data.userId,
+      name: profile?.displayName || 'Người dùng',
+      avatar_url: profile?.avatarUrl || null,
+      trust_score: data.trustScore,
+      verification_level: data.verificationLevel,
     },
-    images: data.intent_images || [],
-    comments,
+    images: (data.images || []).map(img => ({
+      id: img.id,
+      intent_id: img.intentId,
+      url: img.url,
+      display_order: img.displayOrder,
+      created_at: img.createdAt,
+    })),
+    intent_images: (data.images || []).map(img => ({
+      id: img.id,
+      intent_id: img.intentId,
+      url: img.url,
+      display_order: img.displayOrder,
+      created_at: img.createdAt,
+    })),
+    comments: commentsResponse,
   });
 }
 
@@ -69,37 +122,110 @@ export async function PUT(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const supabase = await createClient();
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const auth = await requireAuth(request);
+  if ('error' in auth) return auth.error;
+  const { userId } = auth;
 
   const body = await request.json();
   const { raw_text, ...rest } = body;
 
-  const updateData = { ...rest, updated_at: new Date().toISOString() };
-  if (raw_text) updateData.raw_text = raw_text;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const updateData: any = { updatedAt: new Date() };
 
-  const { data, error } = await supabase
-    .from('intents')
-    .update(updateData)
-    .eq('id', id)
-    .eq('user_id', user.id)
-    .select()
-    .single();
+  // Map snake_case body fields to camelCase Prisma fields
+  if (rest.title !== undefined) updateData.title = rest.title;
+  if (rest.category !== undefined) updateData.category = rest.category;
+  if (rest.district !== undefined) updateData.district = rest.district;
+  if (rest.ward !== undefined) updateData.ward = rest.ward;
+  if (rest.address !== undefined) updateData.address = rest.address;
+  if (rest.status !== undefined) updateData.status = rest.status;
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  // Re-parse AI title & structured data if raw_text changed
+  if (raw_text) {
+    updateData.rawText = raw_text;
+
+    if (isOpenAIConfigured()) {
+      try {
+        // Fetch current intent to get its type
+        const current = await prisma.intent.findUnique({
+          where: { id },
+          select: { type: true },
+        });
+
+        const intentType = body.type || current?.type || 'CAN';
+
+        const [parsed, formatted] = await Promise.all([
+          parseSearchIntent(raw_text),
+          formatIntentContent(raw_text, intentType),
+        ]);
+
+        updateData.title = formatted.title;
+        updateData.rawText = formatted.normalized_text;
+        updateData.district = parsed.districts?.[0] || updateData.district || null;
+        updateData.parsedData = {
+          district: parsed.districts?.[0] || null,
+          bedrooms: parsed.bedrooms,
+          bathrooms: parsed.bathrooms,
+          area_min: parsed.area_min,
+          area_max: parsed.area_max,
+          keywords: parsed.keywords,
+          preferences: parsed.preferences,
+        };
+
+        if (intentType === 'CO') {
+          updateData.price = parsed.price_min || parsed.price_max ? BigInt(parsed.price_min || parsed.price_max!) : null;
+        } else {
+          updateData.priceMin = parsed.price_min ? BigInt(parsed.price_min) : null;
+          updateData.priceMax = parsed.price_max ? BigInt(parsed.price_max) : null;
+        }
+      } catch {
+        // AI re-parse failed — continue with raw_text update only
+      }
+    }
   }
+
+  // Prisma: update where id AND userId match (ownership check)
+  const data = await prisma.intent.updateMany({
+    where: { id, userId },
+    data: updateData,
+  });
+
+  if (data.count === 0) {
+    return NextResponse.json({ error: 'Not found or not owned' }, { status: 404 });
+  }
+
+  // Fetch updated record
+  const updated = await prisma.intent.findUnique({ where: { id } });
 
   // Re-generate embedding if raw_text changed
-  if (raw_text && data) {
-    generateIntentEmbedding(data as Intent, supabase).catch(() => {});
+  if (raw_text && updated) {
+    const intentForEmbed = {
+      id: updated.id,
+      user_id: updated.userId || '',
+      type: updated.type,
+      raw_text: updated.rawText,
+      title: updated.title,
+      parsed_data: updated.parsedData as Record<string, unknown>,
+      category: updated.category,
+      price: updated.price ? Number(updated.price) : null,
+      price_min: updated.priceMin ? Number(updated.priceMin) : null,
+      price_max: updated.priceMax ? Number(updated.priceMax) : null,
+      district: updated.district,
+      ward: updated.ward,
+      city: updated.city,
+    } as unknown as Intent;
+    generateIntentEmbedding(intentForEmbed).catch(() => {});
   }
 
-  return NextResponse.json(data);
+  // Convert for response
+  const responseData = updated ? {
+    ...updated,
+    price: updated.price ? Number(updated.price) : null,
+    price_min: updated.priceMin ? Number(updated.priceMin) : null,
+    price_max: updated.priceMax ? Number(updated.priceMax) : null,
+  } : null;
+
+  return NextResponse.json(responseData);
 }
 
 // DELETE /api/intents/[id] — soft delete
@@ -108,21 +234,17 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const supabase = await createClient();
+  const auth = await requireAuth(_request);
+  if ('error' in auth) return auth.error;
+  const { userId } = auth;
 
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const result = await prisma.intent.updateMany({
+    where: { id, userId },
+    data: { status: 'hidden', updatedAt: new Date() },
+  });
 
-  const { error } = await supabase
-    .from('intents')
-    .update({ status: 'hidden', updated_at: new Date().toISOString() })
-    .eq('id', id)
-    .eq('user_id', user.id);
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  if (result.count === 0) {
+    return NextResponse.json({ error: 'Not found or not owned' }, { status: 404 });
   }
 
   return NextResponse.json({ success: true });

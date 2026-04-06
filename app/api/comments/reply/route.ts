@@ -1,14 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
+import { prisma } from '@/lib/db'
 import { processAndReplyToComment } from '@/lib/ai/agents/reply-agent'
 import { generateCrossComments } from '@/lib/ai/agents/bot-interactions'
-
-function getSupabaseAdmin() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
-}
 
 // Rate limiting
 let lastRunTime = 0
@@ -16,35 +9,31 @@ const MIN_INTERVAL = 30000 // 30 seconds
 
 // GET /api/comments/reply - Get status of pending replies
 export async function GET() {
-  const supabase = getSupabaseAdmin()
-
-  const { data: pending, error } = await supabase
-    .from('pending_replies')
-    .select(
-      `
-      id,
-      status,
-      created_at,
-      processed_at,
-      error_message,
-      comments:comment_id (
-        content,
-        profiles:user_id (display_name)
-      ),
-      bots:bot_id (name, handle)
-    `
-    )
-    .order('created_at', { ascending: false })
-    .limit(20)
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
-  }
+  const pending = await prisma.$queryRaw`
+    SELECT
+      pr.id,
+      pr.status,
+      pr.created_at,
+      pr.processed_at,
+      pr.error_message,
+      c.content AS comment_content,
+      p.display_name AS user_display_name,
+      b.name AS bot_name,
+      b.handle AS bot_handle
+    FROM pending_replies pr
+    LEFT JOIN comments c ON c.id = pr.comment_id
+    LEFT JOIN profiles p ON p.id = c.user_id
+    LEFT JOIN bots b ON b.id = pr.bot_id
+    ORDER BY pr.created_at DESC
+    LIMIT 20
+  ` as Array<Record<string, unknown>>
 
   // Get counts by status
-  const { data: stats } = await supabase
-    .from('pending_replies')
-    .select('status')
+  const stats = await prisma.$queryRaw`
+    SELECT status, COUNT(*)::int AS count
+    FROM pending_replies
+    GROUP BY status
+  ` as Array<{ status: string; count: number }>
 
   const statusCounts = {
     pending: 0,
@@ -53,9 +42,9 @@ export async function GET() {
     failed: 0,
   }
 
-  stats?.forEach((row) => {
+  stats.forEach((row) => {
     if (row.status in statusCounts) {
-      statusCounts[row.status as keyof typeof statusCounts]++
+      statusCounts[row.status as keyof typeof statusCounts] = row.count
     }
   })
 
@@ -78,7 +67,6 @@ export async function POST(request: NextRequest) {
   }
   lastRunTime = now
 
-  const supabase = getSupabaseAdmin()
   const body = await request.json().catch(() => ({}))
   const { batch_limit = 5, include_cross_comments = true } = body
 
@@ -89,25 +77,21 @@ export async function POST(request: NextRequest) {
   }[] = []
 
   try {
-    // 1. Get pending replies
-    const { data: pendingReplies, error: fetchError } = await supabase
-      .from('pending_replies')
-      .select('id, comment_id, bot_id')
-      .eq('status', 'pending')
-      .order('created_at', { ascending: true })
-      .limit(batch_limit)
-
-    if (fetchError) {
-      throw fetchError
-    }
+    // 1. Get pending replies (pending_replies is a non-Prisma table, use raw query)
+    const pendingReplies = await prisma.$queryRaw`
+      SELECT id, comment_id, bot_id
+      FROM pending_replies
+      WHERE status = 'pending'
+      ORDER BY created_at ASC
+      LIMIT ${batch_limit}
+    ` as Array<{ id: string; comment_id: string; bot_id: string }>
 
     // 2. Process each pending reply
-    for (const pending of pendingReplies || []) {
+    for (const pending of pendingReplies) {
       // Mark as processing
-      await supabase
-        .from('pending_replies')
-        .update({ status: 'processing' })
-        .eq('id', pending.id)
+      await prisma.$executeRaw`
+        UPDATE pending_replies SET status = 'processing' WHERE id = ${pending.id}
+      `
 
       try {
         // Generate and save reply
@@ -115,13 +99,11 @@ export async function POST(request: NextRequest) {
 
         if (result.success) {
           // Mark as completed
-          await supabase
-            .from('pending_replies')
-            .update({
-              status: 'completed',
-              processed_at: new Date().toISOString(),
-            })
-            .eq('id', pending.id)
+          await prisma.$executeRaw`
+            UPDATE pending_replies
+            SET status = 'completed', processed_at = NOW()
+            WHERE id = ${pending.id}
+          `
 
           results.push({
             commentId: pending.comment_id,
@@ -132,18 +114,16 @@ export async function POST(request: NextRequest) {
         }
       } catch (err) {
         // Mark as failed
-        await supabase
-          .from('pending_replies')
-          .update({
-            status: 'failed',
-            error_message: err instanceof Error ? err.message : 'Unknown error',
-            processed_at: new Date().toISOString(),
-          })
-          .eq('id', pending.id)
+        const errorMsg = err instanceof Error ? err.message : 'Unknown error'
+        await prisma.$executeRaw`
+          UPDATE pending_replies
+          SET status = 'failed', error_message = ${errorMsg}, processed_at = NOW()
+          WHERE id = ${pending.id}
+        `
 
         results.push({
           commentId: pending.comment_id,
-          error: err instanceof Error ? err.message : 'Unknown error',
+          error: errorMsg,
         })
       }
 
@@ -154,16 +134,16 @@ export async function POST(request: NextRequest) {
     // 3. Process cross-comments for recent bot posts (optional)
     let crossCommentResults = null
     if (include_cross_comments) {
-      // Get recent posts without cross-comments
-      const { data: recentPosts } = await supabase
-        .from('posts')
-        .select('id')
-        .gt('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
-        .order('created_at', { ascending: false })
-        .limit(3)
+      const recentPosts = await prisma.post.findMany({
+        where: {
+          createdAt: { gt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+        },
+        select: { id: true },
+        orderBy: { createdAt: 'desc' },
+        take: 3,
+      })
 
-      if (recentPosts && recentPosts.length > 0) {
-        // Pick one random post for cross-commenting
+      if (recentPosts.length > 0) {
         const randomPost = recentPosts[Math.floor(Math.random() * recentPosts.length)]
         crossCommentResults = await generateCrossComments(randomPost.id)
       }

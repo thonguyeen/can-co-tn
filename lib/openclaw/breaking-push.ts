@@ -8,12 +8,7 @@
 import { getOpenClawClient } from './client';
 import { getSubscribedUsers } from './channel-manager';
 import { CanvasCard } from './types';
-import { createClient } from '@supabase/supabase-js';
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+import { prisma } from '@/lib/db';
 
 const LEVEL_CONFIG = {
   critical: { emoji: '🔴', label: 'CRITICAL', shouldPush: true },
@@ -31,28 +26,27 @@ export async function pushBreakingNews(
 ): Promise<{ sent: number; failed: number }> {
   const client = getOpenClawClient();
 
-  // Get breaking news details
-  const { data: breaking } = await supabase
-    .from('breaking_news')
-    .select(`
-      *,
-      posts (
-        id,
-        content,
-        bots (name, handle, avatar_url)
-      )
-    `)
-    .eq('id', breakingId)
-    .single();
+  const breaking = await prisma.breakingNews.findUnique({
+    where: { id: breakingId },
+    include: {
+      post: {
+        select: {
+          id: true,
+          content: true,
+          bot: { select: { name: true, handle: true, avatarUrl: true } }
+        }
+      }
+    }
+  });
 
   if (!breaking) {
     return { sent: 0, failed: 0 };
   }
 
-  const config = LEVEL_CONFIG[breaking.level as keyof typeof LEVEL_CONFIG] || LEVEL_CONFIG.normal;
+  const config = LEVEL_CONFIG[breaking.urgencyLevel as keyof typeof LEVEL_CONFIG] || LEVEL_CONFIG.normal;
 
   // Get subscribed users
-  const subscribers = await getSubscribedUsers(breaking.category || 'all', 'breakingNews');
+  const subscribers = await getSubscribedUsers((breaking.category as string) || 'all', 'breakingNews');
 
   if (subscribers.length === 0) {
     return { sent: 0, failed: 0 };
@@ -70,61 +64,56 @@ export async function pushBreakingNews(
   );
 
   // Log push
-  await supabase.from('push_logs').insert({
-    type: 'breaking_news',
-    reference_id: breakingId,
-    recipients_count: subscribers.length,
-    sent_count: result.sent,
-    failed_count: result.failed,
-    errors: result.errors,
+  // TODO: Restore when pushLog is added
+  /*
+  await prisma.pushLog.create({
+    data: {
+      type: 'breaking_news',
+      referenceId: breakingId,
+      recipientsCount: subscribers.length,
+      sentCount: result.sent,
+      failedCount: result.failed,
+      errors: result.errors as any,
+    }
   });
+  */
 
   return { sent: result.sent, failed: result.failed };
 }
 
 function formatBreakingMessage(
-  breaking: {
-    headline: string;
-    post_id: string;
-    posts: { content: string; bots: { name: string; handle: string } } | null;
-  },
+  breaking: any,
   config: typeof LEVEL_CONFIG[keyof typeof LEVEL_CONFIG]
 ): string {
-  const bot = breaking.posts?.bots;
-  const content = breaking.posts?.content || '';
+  const bot = breaking.post?.bot;
+  const content = breaking.post?.content || '';
 
   return `${config.emoji} *${config.label}: ${breaking.headline}*
 
 ${content.slice(0, 300)}${content.length > 300 ? '...' : ''}
 
 📍 via @${bot?.handle || 'facebot'}
-🔗 https://facebot.app/post/${breaking.post_id}
+🔗 https://facebot.app/post/${breaking.postId}
 
 ---
 Tắt thông báo: \`settings breaking off\``;
 }
 
 function createBreakingCanvas(
-  breaking: {
-    headline: string;
-    category?: string;
-    level: string;
-    post_id: string;
-    posts: { content: string; bots: { avatar_url?: string } } | null;
-  },
+  breaking: any,
   config: typeof LEVEL_CONFIG[keyof typeof LEVEL_CONFIG]
 ): CanvasCard {
   return {
     type: 'news',
     title: `${config.emoji} ${config.label}`,
     subtitle: breaking.headline,
-    imageUrl: breaking.posts?.bots?.avatar_url,
-    body: breaking.posts?.content?.slice(0, 200),
+    imageUrl: breaking.post?.bot?.avatarUrl,
+    body: breaking.post?.content?.slice(0, 200),
     actions: [
       {
         type: 'link',
         label: 'Đọc đầy đủ',
-        action: `https://facebot.app/post/${breaking.post_id}`,
+        action: `https://facebot.app/post/${breaking.postId}`,
         style: 'primary',
       },
       {
@@ -135,7 +124,7 @@ function createBreakingCanvas(
       },
     ],
     metadata: {
-      level: breaking.level,
+      level: breaking.urgencyLevel,
       category: breaking.category,
     },
   };
@@ -146,17 +135,16 @@ function createBreakingCanvas(
 // ═══════════════════════════════════════════════════════════════
 
 export async function onBreakingNewsCreated(breakingId: string): Promise<void> {
-  const { data } = await supabase
-    .from('breaking_news')
-    .select('level, should_notify')
-    .eq('id', breakingId)
-    .single();
+  const data = await prisma.breakingNews.findUnique({
+    where: { id: breakingId },
+    select: { urgencyLevel: true }
+  });
 
   if (!data) return;
 
-  const config = LEVEL_CONFIG[data.level as keyof typeof LEVEL_CONFIG] || LEVEL_CONFIG.normal;
+  const config = LEVEL_CONFIG[data.urgencyLevel as keyof typeof LEVEL_CONFIG] || LEVEL_CONFIG.normal;
 
-  if (config.shouldPush && data.should_notify !== false) {
+  if (config.shouldPush) {
     await pushBreakingNews(breakingId);
   }
 }

@@ -2,12 +2,14 @@
 // PROACTIVE POSTING ENGINE
 // ═══════════════════════════════════════════════════════════════
 
+import { prisma } from '@/lib/db'
 import { BOT_PERSONAS } from '../prompts/bot-personas'
 import { chat } from '../client'
 import {
   getBotEmotionalState,
   getEmotionalPromptModifier,
 } from '../emotions/emotional-state'
+import { randomUUID } from 'crypto'
 
 export type ProactivePostType =
   | 'opinion'
@@ -207,74 +209,53 @@ export async function saveProactivePost(
   botId: string,
   result: ProactivePostResult
 ): Promise<string | null> {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-  if (!supabaseUrl || !supabaseKey) {
-    console.log('No Supabase config, skipping save')
-    return null
-  }
-
-  const { createClient } = await import('@supabase/supabase-js')
-  const supabase = createClient(supabaseUrl, supabaseKey)
-
   // For threads, save each part as separate posts
   if (result.threadParts && result.threadParts.length > 1) {
-    return saveThreadPosts(supabase, botId, result)
+    return saveThreadPosts(botId, result)
   }
 
-  const { data, error } = await supabase
-    .from('posts')
-    .insert({
-      content: result.content,
-      bot_id: botId,
-      verification_status: 'verified',
-      verification_note: `Proactive ${result.postType} post`,
-      sources: {
+  try {
+    const data = await prisma.$queryRaw<any[]>`
+      INSERT INTO posts (content, bot_id, verification_status, verification_note, sources)
+      VALUES (${result.content}, ${botId}, 'verified', 'Proactive ${result.postType} post', ${JSON.stringify({
         type: 'proactive',
         postType: result.postType,
         emotionalState: result.emotionalState,
-      },
-    })
-    .select('id')
-    .single()
-
-  if (error) {
+      })}::jsonb)
+      RETURNING id
+    `
+    return data[0]?.id || null
+  } catch (error) {
     console.error('Error saving proactive post:', error)
     return null
   }
-
-  return data.id
 }
 
 async function saveThreadPosts(
-  supabase: any,
   botId: string,
   result: ProactivePostResult
 ): Promise<string | null> {
-  const threadId = crypto.randomUUID()
+  const threadId = randomUUID()
   let firstPostId: string | null = null
 
   for (let i = 0; i < result.threadParts!.length; i++) {
-    const { data, error } = await supabase
-      .from('posts')
-      .insert({
-        content: result.threadParts![i],
-        bot_id: botId,
-        verification_status: 'verified',
-        verification_note: `Thread part ${i + 1}/${result.threadParts!.length}`,
-        sources: {
+    try {
+      const data = await prisma.$queryRaw<any[]>`
+        INSERT INTO posts (content, bot_id, verification_status, verification_note, sources)
+        VALUES (${result.threadParts![i]}, ${botId}, 'verified', 'Thread part ${i + 1}/${result.threadParts!.length}', ${JSON.stringify({
           type: 'thread',
           threadId,
           partNumber: i + 1,
           totalParts: result.threadParts!.length,
           emotionalState: result.emotionalState,
-        },
-      })
-      .select('id')
-      .single()
-
-    if (!error && !firstPostId) {
-      firstPostId = data.id
+        })}::jsonb)
+        RETURNING id
+      `
+      if (!firstPostId && data.length > 0) {
+        firstPostId = data[0].id
+      }
+    } catch (e) {
+      console.error('Error saving thread post part:', e)
     }
   }
 

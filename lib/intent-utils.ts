@@ -73,12 +73,16 @@ export function parsedDataToTags(
     tags.push({ icon: '🏘', label: String(parsedData.project_name), type: 'project' });
   }
 
-  // Price tag
+  // Price tag — nếu không có numeric price thì dùng price_label từ AI
   if (opts?.price) {
     tags.push({ icon: '💰', label: formatPrice(opts.price), type: 'price' });
   } else {
     const range = formatPriceRange(opts?.priceMin, opts?.priceMax);
-    if (range) tags.push({ icon: '💰', label: range, type: 'price' });
+    if (range) {
+      tags.push({ icon: '💰', label: range, type: 'price' });
+    } else if (parsedData.price_label) {
+      tags.push({ icon: '💰', label: String(parsedData.price_label), type: 'price' });
+    }
   }
 
   // Keywords
@@ -86,6 +90,11 @@ export function parsedDataToTags(
     for (const kw of parsedData.keywords.slice(0, 3)) {
       tags.push({ icon: '🎯', label: String(kw), type: 'keyword' });
     }
+  }
+
+  // Fallback: dùng ai_tags trực tiếp nếu chưa có tag nào
+  if (tags.length === 0 && Array.isArray(parsedData.ai_tags)) {
+    return parsedData.ai_tags as Tag[];
   }
 
   return tags;

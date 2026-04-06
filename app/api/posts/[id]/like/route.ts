@@ -1,67 +1,35 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createServerClient } from '@supabase/ssr'
-import { cookies } from 'next/headers'
-
-async function getSupabase() {
-  const cookieStore = await cookies()
-  return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return cookieStore.getAll()
-        },
-        setAll(cookiesToSet) {
-          try {
-            cookiesToSet.forEach(({ name, value, options }) =>
-              cookieStore.set(name, value, options)
-            )
-          } catch {
-            // Ignore
-          }
-        },
-      },
-    }
-  )
-}
+import { prisma } from '@/lib/db'
+import { requireAuth } from '@/lib/data/get-user'
 
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: postId } = await params
-  const supabase = await getSupabase()
+  const auth = await requireAuth(request)
+  if ('error' in auth) return auth.error
+  const { userId } = auth
 
-  const { data: { user } } = await supabase.auth.getUser()
-
-  if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
-
-  // Check if already liked
-  const { data: existingLike } = await supabase
-    .from('likes')
-    .select('*')
-    .eq('user_id', user.id)
-    .eq('post_id', postId)
-    .single()
+  // Check if already liked (composite PK: userId + postId)
+  const existingLike = await prisma.like.findUnique({
+    where: { userId_postId: { userId, postId } },
+  })
 
   if (existingLike) {
     return NextResponse.json({ error: 'Already liked' }, { status: 400 })
   }
 
   // Insert like
-  const { error: insertError } = await supabase
-    .from('likes')
-    .insert({ user_id: user.id, post_id: postId })
+  await prisma.like.create({
+    data: { userId, postId },
+  })
 
-  if (insertError) {
-    return NextResponse.json({ error: insertError.message }, { status: 500 })
-  }
-
-  // Increment likes_count using RPC function
-  await supabase.rpc('increment_post_likes', { p_post_id: postId })
+  // Increment likes_count
+  await prisma.post.update({
+    where: { id: postId },
+    data: { likesCount: { increment: 1 } },
+  })
 
   return NextResponse.json({ success: true, liked: true })
 }
@@ -71,27 +39,25 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: postId } = await params
-  const supabase = await getSupabase()
-
-  const { data: { user } } = await supabase.auth.getUser()
-
-  if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
+  const auth = await requireAuth(request)
+  if ('error' in auth) return auth.error
+  const { userId } = auth
 
   // Delete like
-  const { error: deleteError } = await supabase
-    .from('likes')
-    .delete()
-    .eq('user_id', user.id)
-    .eq('post_id', postId)
-
-  if (deleteError) {
-    return NextResponse.json({ error: deleteError.message }, { status: 500 })
+  try {
+    await prisma.like.delete({
+      where: { userId_postId: { userId, postId } },
+    })
+  } catch {
+    // Like not found — ignore
+    return NextResponse.json({ success: true, liked: false })
   }
 
   // Decrement likes_count
-  await supabase.rpc('decrement_post_likes', { p_post_id: postId })
+  await prisma.post.update({
+    where: { id: postId },
+    data: { likesCount: { decrement: 1 } },
+  })
 
   return NextResponse.json({ success: true, liked: false })
 }
@@ -101,20 +67,16 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: postId } = await params
-  const supabase = await getSupabase()
+  const { getAuthUserId } = await import('@/lib/data/get-user')
+  const userId = await getAuthUserId(request)
 
-  const { data: { user } } = await supabase.auth.getUser()
-
-  if (!user) {
+  if (!userId) {
     return NextResponse.json({ liked: false })
   }
 
-  const { data: like } = await supabase
-    .from('likes')
-    .select('*')
-    .eq('user_id', user.id)
-    .eq('post_id', postId)
-    .single()
+  const like = await prisma.like.findUnique({
+    where: { userId_postId: { userId, postId } },
+  })
 
   return NextResponse.json({ liked: !!like })
 }

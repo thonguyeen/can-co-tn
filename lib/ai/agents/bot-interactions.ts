@@ -2,14 +2,7 @@ import { chat } from '../client'
 import { BOT_PERSONAS, getBotById, getBotAllies, getBotRivals } from '../prompts/bot-personas'
 import { saveBotReply } from './reply-agent'
 import { setBotEmotionalState } from '../emotions/emotional-state'
-import { createClient } from '@supabase/supabase-js'
-
-function getSupabaseAdmin() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
-}
+import { prisma } from '@/lib/db'
 
 // ═══════════════════════════════════════════════════════════════
 // BOT-TO-BOT CROSS-COMMENTING
@@ -109,20 +102,15 @@ export async function generateCrossComments(postId: string): Promise<{
   generated: number
   results: { botId: string; commentId?: string; error?: string }[]
 }> {
-  const supabase = getSupabaseAdmin()
-
-  const { data: post } = await supabase
-    .from('posts')
-    .select(
-      `
-      id,
-      content,
-      bot_id,
-      bots:bot_id (name)
-    `
-    )
-    .eq('id', postId)
-    .single()
+  const post = await prisma.post.findUnique({
+    where: { id: postId },
+    select: {
+      id: true,
+      content: true,
+      botId: true,
+      bot: { select: { name: true } }
+    }
+  })
 
   if (!post) {
     return { generated: 0, results: [] }
@@ -132,13 +120,12 @@ export async function generateCrossComments(postId: string): Promise<{
   const allBots = Object.values(BOT_PERSONAS)
 
   for (const bot of allBots) {
-    if (shouldBotComment(post.bot_id, post.content, bot.id)) {
+    if (shouldBotComment(post.botId, post.content, bot.id)) {
       const { success, comment, error } = await generateBotCrossComment({
         originalPost: {
           content: post.content,
-          botId: post.bot_id,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          botName: (post.bots as any)?.name || 'Bot',
+          botId: post.botId,
+          botName: post.bot?.name || 'Bot',
         },
         commentingBot: {
           id: bot.id,
@@ -335,18 +322,14 @@ export async function generateQuotePost(
   const bot = BOT_PERSONAS[quotingBotHandle]
   if (!bot) throw new Error('Bot not found')
 
-  const supabase = getSupabaseAdmin()
-
-  const { data: originalPost } = await supabase
-    .from('posts')
-    .select(`*, bots (name, handle)`)
-    .eq('id', originalPostId)
-    .single()
+  const originalPost = await prisma.post.findUnique({
+    where: { id: originalPostId },
+    select: { id: true, content: true, bot: { select: { handle: true, name: true } } }
+  })
 
   if (!originalPost) throw new Error('Original post not found')
 
-  const originalBotHandle = (originalPost.bots as any)?.handle || 'unknown'
-  const originalBotName = (originalPost.bots as any)?.name || 'Bot'
+  const originalBotHandle = originalPost.bot?.handle || 'unknown'
 
   const systemPrompt = `${bot.systemPrompt}
 
@@ -365,24 +348,31 @@ Chỉ output commentary, không có gì khác.`
   const snippet = originalPost.content.slice(0, 200) + (originalPost.content.length > 200 ? '...' : '')
   const fullContent = `${commentary.trim()}\n\n📎 Quote từ @${originalBotHandle}:\n"${snippet}"`
 
-  const { data: newPost, error } = await supabase
-    .from('posts')
-    .insert({
-      content: fullContent,
-      bot_id: bot.id,
-      verification_status: 'verified',
-      sources: {
-        type: 'quote',
-        quotedPostId: originalPostId,
-        quotedBotHandle: originalBotHandle,
+  try {
+    const newPost = await prisma.post.create({
+      data: {
+        content: fullContent,
+        botId: bot.id,
+        verificationStatus: 'verified',
+        sources: {
+          type: 'quote',
+          quotedPostId: originalPostId,
+          quotedBotHandle: originalBotHandle,
+        } as any,
       },
+      select: { id: true }
     })
-    .select('id')
-    .single()
 
-  return {
-    postId: error ? null : newPost.id,
-    content: fullContent,
+    return {
+      postId: newPost.id,
+      content: fullContent,
+    }
+  } catch (error) {
+    console.error('Failed to generate quote post:', error)
+    return {
+      postId: null,
+      content: fullContent,
+    }
   }
 }
 
@@ -406,11 +396,12 @@ export async function tagBotForExpertise(
 
   const comment = `Về vấn đề này, mình nghĩ @${bestBot.handle} có thể có góc nhìn chuyên sâu hơn!`
 
-  const supabase = getSupabaseAdmin()
-  await supabase.from('comments').insert({
-    content: comment,
-    post_id: postId,
-    bot_id: taggingBot.id,
+  await prisma.comment.create({
+    data: {
+      content: comment,
+      postId: postId,
+      botId: taggingBot.id,
+    }
   })
 
   return { comment, taggedBot: bestBot.handle }

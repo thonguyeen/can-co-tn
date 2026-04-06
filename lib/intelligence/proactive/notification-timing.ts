@@ -5,12 +5,7 @@
 // AI-powered optimal notification timing per user
 //
 
-import { createClient } from '@supabase/supabase-js';
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+import { prisma } from '@/lib/db';
 
 export interface NotificationDecision {
   canNotify: boolean;
@@ -142,41 +137,34 @@ export async function recordUserActivity(
   const currentHour = new Date().getHours();
 
   // Get or create activity pattern
-  const { data: existing } = await supabase
-    .from('user_activity_patterns')
-    .select('*')
-    .eq('user_id', userId)
-    .single();
+  const data = await prisma.$queryRaw<any[]>`SELECT * FROM user_activity_patterns WHERE user_id = ${userId} LIMIT 1`;
+  const existing = data[0];
 
   if (existing) {
     const hourlyActivity = existing.hourly_activity || new Array(24).fill(0);
     hourlyActivity[currentHour] = Math.min(100, (hourlyActivity[currentHour] || 0) + 5);
 
-    await supabase
-      .from('user_activity_patterns')
-      .update({
-        hourly_activity: hourlyActivity,
-        last_activity_at: new Date().toISOString(),
-        activity_count: existing.activity_count + 1,
-      })
-      .eq('user_id', userId);
+    await prisma.$executeRaw`
+      UPDATE user_activity_patterns 
+      SET hourly_activity = ${JSON.stringify(hourlyActivity)}::jsonb,
+          last_activity_at = NOW(),
+          activity_count = activity_count + 1
+      WHERE user_id = ${userId}
+    `;
   } else {
     const hourlyActivity = new Array(24).fill(0);
     hourlyActivity[currentHour] = 10;
 
-    await supabase
-      .from('user_activity_patterns')
-      .insert({
-        user_id: userId,
-        hourly_activity: hourlyActivity,
-        preferred_hours: [currentHour],
-        quiet_hours: { start: 23, end: 7 },
-        timezone: 'Asia/Ho_Chi_Minh',
-        notification_fatigue: 0,
-        response_rate: 0.5,
-        activity_count: 1,
-        last_activity_at: new Date().toISOString(),
-      });
+    await prisma.$executeRaw`
+      INSERT INTO user_activity_patterns (
+        user_id, hourly_activity, preferred_hours, quiet_hours, timezone, 
+        notification_fatigue, response_rate, activity_count, last_activity_at
+      ) VALUES (
+        ${userId}, ${JSON.stringify(hourlyActivity)}::jsonb, ${JSON.stringify([currentHour])}::jsonb, 
+        ${JSON.stringify({ start: 23, end: 7 })}::jsonb, 'Asia/Ho_Chi_Minh', 
+        0, 0.5, 1, NOW()
+      )
+    `;
   }
 }
 
@@ -184,46 +172,41 @@ export async function recordNotificationSent(
   userId: string,
   wasResponded: boolean
 ): Promise<void> {
-  const { data: pattern } = await supabase
-    .from('user_activity_patterns')
-    .select('*')
-    .eq('user_id', userId)
-    .single();
+  const data = await prisma.$queryRaw<any[]>`SELECT * FROM user_activity_patterns WHERE user_id = ${userId} LIMIT 1`;
+  const pattern = data[0];
 
   if (!pattern) return;
 
   // Update fatigue and response rate
-  const newFatigue = Math.min(100, pattern.notification_fatigue + (wasResponded ? 0 : 10));
-  const newResponseRate = (pattern.response_rate * 0.9) + (wasResponded ? 0.1 : 0);
+  const newFatigue = Math.min(100, (pattern.notification_fatigue || 0) + (wasResponded ? 0 : 10));
+  const newResponseRate = ((pattern.response_rate || 0) * 0.9) + (wasResponded ? 0.1 : 0);
 
-  await supabase
-    .from('user_activity_patterns')
-    .update({
-      last_notification_at: new Date().toISOString(),
-      notification_fatigue: newFatigue,
-      response_rate: newResponseRate,
-      notifications_sent: (pattern.notifications_sent || 0) + 1,
-      notifications_responded: (pattern.notifications_responded || 0) + (wasResponded ? 1 : 0),
-    })
-    .eq('user_id', userId);
+  await prisma.$executeRaw`
+    UPDATE user_activity_patterns
+    SET last_notification_at = NOW(),
+        notification_fatigue = ${newFatigue},
+        response_rate = ${newResponseRate},
+        notifications_sent = COALESCE(notifications_sent, 0) + 1,
+        notifications_responded = COALESCE(notifications_responded, 0) + ${wasResponded ? 1 : 0}
+    WHERE user_id = ${userId}
+  `;
 }
 
 export async function decayNotificationFatigue(): Promise<number> {
   // Decay fatigue for all users (run daily)
-  const { data } = await supabase
-    .from('user_activity_patterns')
-    .select('id, notification_fatigue')
-    .gt('notification_fatigue', 0);
+  const data = await prisma.$queryRaw<any[]>`
+    SELECT id, notification_fatigue FROM user_activity_patterns 
+    WHERE notification_fatigue > 0
+  `;
 
-  if (!data) return 0;
+  if (!data || data.length === 0) return 0;
 
   for (const pattern of data) {
-    await supabase
-      .from('user_activity_patterns')
-      .update({
-        notification_fatigue: Math.max(0, pattern.notification_fatigue - 10),
-      })
-      .eq('id', pattern.id);
+    await prisma.$executeRaw`
+      UPDATE user_activity_patterns 
+      SET notification_fatigue = GREATEST(0, notification_fatigue - 10)
+      WHERE id = ${pattern.id}::uuid
+    `;
   }
 
   return data.length;
@@ -234,22 +217,19 @@ export async function decayNotificationFatigue(): Promise<number> {
 // ═══════════════════════════════════════════════════════════════
 
 async function getUserActivityPattern(userId: string): Promise<UserActivityPattern> {
-  const { data } = await supabase
-    .from('user_activity_patterns')
-    .select('*')
-    .eq('user_id', userId)
-    .single();
+  const data = await prisma.$queryRaw<any[]>`SELECT * FROM user_activity_patterns WHERE user_id = ${userId} LIMIT 1`;
+  const pattern = data[0];
 
-  if (data) {
+  if (pattern) {
     return {
-      userId: data.user_id,
-      hourlyActivity: data.hourly_activity || new Array(24).fill(20),
-      preferredHours: data.preferred_hours || [9, 12, 19],
-      quietHours: data.quiet_hours || { start: 23, end: 7 },
-      timezone: data.timezone || 'Asia/Ho_Chi_Minh',
-      lastNotificationAt: data.last_notification_at,
-      notificationFatigue: data.notification_fatigue || 0,
-      responseRate: data.response_rate || 0.5,
+      userId: pattern.user_id,
+      hourlyActivity: pattern.hourly_activity || new Array(24).fill(20),
+      preferredHours: pattern.preferred_hours || [9, 12, 19],
+      quietHours: pattern.quiet_hours || { start: 23, end: 7 },
+      timezone: pattern.timezone || 'Asia/Ho_Chi_Minh',
+      lastNotificationAt: pattern.last_notification_at?.toISOString() || null,
+      notificationFatigue: pattern.notification_fatigue || 0,
+      responseRate: pattern.response_rate || 0.5,
     };
   }
 

@@ -5,13 +5,8 @@
 // Tracks and analyzes user interests over time
 //
 
-import { createClient } from '@supabase/supabase-js';
+import { prisma } from '@/lib/db';
 import { storeMemory } from '../memory/persistent-memory';
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
 
 export interface UserInterest {
   id: string;
@@ -55,50 +50,41 @@ export async function recordInterestSignal(
   const weight = SIGNAL_WEIGHTS[signal.type] * (signal.weight || 1);
 
   // Find existing interest
-  const { data: existing } = await supabase
-    .from('user_interests')
-    .select('*')
-    .eq('user_id', userId)
-    .ilike('topic', signal.topic)
-    .single();
+  const existingList = await prisma.$queryRaw<any[]>`
+    SELECT * FROM user_interests 
+    WHERE user_id = ${userId} AND topic ILIKE ${signal.topic}
+    LIMIT 1
+  `;
+  const existing = existingList[0];
 
   if (existing) {
     // Update existing interest
     const newScore = calculateNewScore(existing.score, weight, existing.interaction_count);
     const newTrend = calculateTrend(existing.score, newScore, existing.trend);
+    const updatedSources = [...new Set([...(existing.sources || []), signal.type])];
 
-    const { data } = await supabase
-      .from('user_interests')
-      .update({
-        score: newScore,
-        interaction_count: existing.interaction_count + 1,
-        last_interaction_at: new Date().toISOString(),
-        trend: newTrend,
-        sources: [...new Set([...existing.sources, signal.type])],
-      })
-      .eq('id', existing.id)
-      .select()
-      .single();
+    const updatedList = await prisma.$queryRaw<any[]>`
+      UPDATE user_interests 
+      SET score = ${newScore},
+          interaction_count = interaction_count + 1,
+          last_interaction_at = NOW(),
+          trend = ${newTrend},
+          sources = ${JSON.stringify(updatedSources)}::jsonb
+      WHERE id = ${existing.id}::uuid
+      RETURNING *
+    `;
+    const data = updatedList[0];
 
     return mapToUserInterest(data);
   }
 
   // Create new interest
-  const { data } = await supabase
-    .from('user_interests')
-    .insert({
-      user_id: userId,
-      topic: signal.topic.toLowerCase(),
-      category: signal.category || detectCategory(signal.topic),
-      score: Math.min(100, weight * 5),
-      interaction_count: 1,
-      last_interaction_at: new Date().toISOString(),
-      trend: 'rising',
-      related_topics: [],
-      sources: [signal.type],
-    })
-    .select()
-    .single();
+  const dataList = await prisma.$queryRaw<any[]>`
+    INSERT INTO user_interests (user_id, topic, category, score, interaction_count, last_interaction_at, trend, related_topics, sources)
+    VALUES (${userId}, ${signal.topic.toLowerCase()}, ${signal.category || detectCategory(signal.topic)}, ${Math.min(100, weight * 5)}, 1, NOW(), 'rising', '[]'::jsonb, ${JSON.stringify([signal.type])}::jsonb)
+    RETURNING *
+  `;
+  const data = dataList[0];
 
   // Also store as memory
   await storeMemory(
@@ -121,29 +107,33 @@ export async function getUserInterests(
     limit?: number;
   } = {}
 ): Promise<UserInterest[]> {
-  let query = supabase
-    .from('user_interests')
-    .select('*')
-    .eq('user_id', userId)
-    .order('score', { ascending: false });
+  let sql = 'SELECT * FROM user_interests WHERE user_id = $1';
+  const params: any[] = [userId];
+  let paramIdx = 2;
 
   if (options.minScore) {
-    query = query.gte('score', options.minScore);
+    sql += ` AND score >= $${paramIdx++}`;
+    params.push(options.minScore);
   }
 
   if (options.category) {
-    query = query.eq('category', options.category);
+    sql += ` AND category = $${paramIdx++}`;
+    params.push(options.category);
   }
 
   if (options.trend) {
-    query = query.eq('trend', options.trend);
+    sql += ` AND trend = $${paramIdx++}`;
+    params.push(options.trend);
   }
+
+  sql += ' ORDER BY score DESC';
 
   if (options.limit) {
-    query = query.limit(options.limit);
+    sql += ` LIMIT $${paramIdx++}`;
+    params.push(options.limit);
   }
 
-  const { data } = await query;
+  const data = await prisma.$queryRawUnsafe<any[]>(sql, ...params);
 
   return (data || []).map(mapToUserInterest);
 }
@@ -230,13 +220,13 @@ export async function findRelatedUsers(
 
   if (topics.length === 0) return [];
 
-  // Find users with similar interests
-  const { data } = await supabase
-    .from('user_interests')
-    .select('user_id')
-    .in('topic', topics)
-    .neq('user_id', userId)
-    .gte('score', 30);
+  const topicsStr = topics.map(t => `'${t}'`).join(',');
+  const data = await prisma.$queryRawUnsafe<any[]>(`
+    SELECT user_id FROM user_interests 
+    WHERE topic IN (${topicsStr}) 
+      AND user_id != $1 
+      AND score >= 30
+  `, userId);
 
   // Count overlap per user
   const userCounts: Record<string, number> = {};
@@ -260,11 +250,11 @@ export async function applyInterestDecay(): Promise<number> {
   const decayThreshold = new Date();
   decayThreshold.setDate(decayThreshold.getDate() - 7); // 7 days
 
-  const { data: staleInterests } = await supabase
-    .from('user_interests')
-    .select('id, score, trend')
-    .lt('last_interaction_at', decayThreshold.toISOString())
-    .gt('score', 10);
+  const staleInterests = await prisma.$queryRaw<any[]>`
+    SELECT id, score, trend FROM user_interests 
+    WHERE last_interaction_at < ${decayThreshold} 
+      AND score > 10
+  `;
 
   if (!staleInterests || staleInterests.length === 0) {
     return 0;
@@ -273,13 +263,12 @@ export async function applyInterestDecay(): Promise<number> {
   // Apply decay
   for (const interest of staleInterests) {
     const decayedScore = Math.max(10, interest.score * 0.9); // 10% decay, min 10
-    await supabase
-      .from('user_interests')
-      .update({
-        score: decayedScore,
-        trend: decayedScore < interest.score - 5 ? 'declining' : interest.trend,
-      })
-      .eq('id', interest.id);
+    const newTrend = decayedScore < interest.score - 5 ? 'declining' : interest.trend;
+    await prisma.$executeRaw`
+      UPDATE user_interests 
+      SET score = ${decayedScore}, trend = ${newTrend}
+      WHERE id = ${interest.id}::uuid
+    `;
   }
 
   return staleInterests.length;
@@ -334,7 +323,7 @@ function mapToUserInterest(data: Record<string, unknown>): UserInterest {
     category: data.category as string,
     score: data.score as number,
     interactionCount: data.interaction_count as number,
-    lastInteractionAt: data.last_interaction_at as string,
+    lastInteractionAt: data.last_interaction_at?.toString() as string || new Date().toISOString(),
     trend: data.trend as 'rising' | 'stable' | 'declining',
     relatedTopics: (data.related_topics || []) as string[],
     sources: (data.sources || []) as string[],

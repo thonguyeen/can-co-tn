@@ -1,4 +1,5 @@
-import { createClient } from '@supabase/supabase-js'
+import { prisma } from '@/lib/db'
+import { toSnakeCase } from '@/lib/data/helpers'
 import {
   rankPosts,
   ScoringContext,
@@ -6,13 +7,6 @@ import {
   DEFAULT_WEIGHTS,
   PostForScoring,
 } from './scoring'
-
-function getSupabaseAdmin() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
-}
 
 // ═══════════════════════════════════════════════════════════════
 // TYPES
@@ -55,71 +49,55 @@ export async function getFeed(options: FeedOptions = {}): Promise<FeedResult> {
     timeRange = 'all',
   } = options
 
-  const supabase = getSupabaseAdmin()
-
   // 1. Build scoring context (personalization data)
   const context = await buildScoringContext(userId)
 
-  // 2. Build base query
-  let query = supabase
-    .from('posts')
-    .select(
-      `
-      id,
-      content,
-      created_at,
-      updated_at,
-      verification_status,
-      verification_note,
-      likes_count,
-      comments_count,
-      saves_count,
-      sources,
-      bot_id,
-      bots (
-        id,
-        name,
-        handle,
-        avatar_url,
-        color_accent,
-        expertise
-      )
-    `
-    )
-    .order('created_at', { ascending: false })
+  // 2. Build where clause
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const where: any = {}
 
   // 3. Apply filters
   if (botHandle) {
-    const { data: bot } = await supabase
-      .from('bots')
-      .select('id')
-      .eq('handle', botHandle)
-      .single()
-
+    const bot = await prisma.bot.findUnique({
+      where: { handle: botHandle },
+      select: { id: true },
+    })
     if (bot) {
-      query = query.eq('bot_id', bot.id)
+      where.botId = bot.id
     }
   }
 
   if (verificationStatus) {
-    query = query.eq('verification_status', verificationStatus)
+    where.verificationStatus = verificationStatus
   }
 
   if (timeRange !== 'all') {
     const since = getTimeRangeSince(timeRange)
-    query = query.gte('created_at', since.toISOString())
+    where.createdAt = { gte: since }
   }
 
   // 4. Fetch more posts than needed for proper ranking after scoring
   const fetchLimit = limit * 3
 
-  const { data: posts, error } = await query.limit(fetchLimit)
+  const posts = await prisma.post.findMany({
+    where,
+    include: {
+      bot: {
+        select: {
+          id: true,
+          name: true,
+          handle: true,
+          avatarUrl: true,
+          colorAccent: true,
+          expertise: true,
+        },
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: fetchLimit,
+  })
 
-  if (error) {
-    throw new Error(`Failed to fetch feed: ${error.message}`)
-  }
-
-  if (!posts || posts.length === 0) {
+  if (posts.length === 0) {
     return {
       posts: [],
       nextCursor: null,
@@ -128,10 +106,13 @@ export async function getFeed(options: FeedOptions = {}): Promise<FeedResult> {
     }
   }
 
-  // 5. Score and rank posts
-  const rankedPosts = rankPosts(posts as unknown as PostForScoring[], context)
+  // 5. Convert to snake_case for scoring engine compatibility
+  const postsSnake = posts.map((p) => toSnakeCase(p))
 
-  // 6. Apply cursor-based pagination
+  // 6. Score and rank posts
+  const rankedPosts = rankPosts(postsSnake as unknown as PostForScoring[], context)
+
+  // 7. Apply cursor-based pagination
   let startIndex = 0
   if (cursor) {
     const cursorIndex = rankedPosts.findIndex((p) => p.id === cursor)
@@ -172,36 +153,31 @@ async function buildScoringContext(userId?: string): Promise<ScoringContext> {
     return context
   }
 
-  const supabase = getSupabaseAdmin()
-
   // Get followed bots
-  const { data: follows } = await supabase
-    .from('follows')
-    .select('bot_id')
-    .eq('user_id', userId)
-
-  if (follows) {
-    follows.forEach((f) => context.followedBotIds.add(f.bot_id))
-  }
+  const follows = await prisma.follow.findMany({
+    where: { userId },
+    select: { botId: true },
+  })
+  follows.forEach((f) => context.followedBotIds.add(f.botId))
 
   // Get interacted posts (liked, saved, commented)
-  const { data: likes } = await supabase
-    .from('likes')
-    .select('post_id')
-    .eq('user_id', userId)
-
-  const { data: saves } = await supabase
-    .from('saves')
-    .select('post_id')
-    .eq('user_id', userId)
-
-  const { data: comments } = await supabase
-    .from('comments')
-    .select('post_id')
-    .eq('user_id', userId)
+  const [likes, saves, comments] = await Promise.all([
+    prisma.like.findMany({
+      where: { userId },
+      select: { postId: true },
+    }),
+    prisma.save.findMany({
+      where: { userId },
+      select: { postId: true },
+    }),
+    prisma.comment.findMany({
+      where: { userId },
+      select: { postId: true },
+    }),
+  ])
 
   ;[likes, saves, comments].forEach((items) => {
-    items?.forEach((item) => context.interactedPostIds.add(item.post_id))
+    items.forEach((item) => context.interactedPostIds.add(item.postId))
   })
 
   return context
@@ -212,31 +188,32 @@ async function buildScoringContext(userId?: string): Promise<ScoringContext> {
 // ═══════════════════════════════════════════════════════════════
 
 export async function getTrendingPosts(limit: number = 5): Promise<ScoredPost[]> {
-  const supabase = getSupabaseAdmin()
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000)
 
-  const { data: posts } = await supabase
-    .from('posts')
-    .select(
-      `
-      id,
-      content,
-      created_at,
-      verification_status,
-      likes_count,
-      comments_count,
-      saves_count,
-      bot_id,
-      bots (name, handle, avatar_url, color_accent)
-    `
-    )
-    .gte('created_at', since.toISOString())
-    .order('created_at', { ascending: false })
-    .limit(50)
+  const posts = await prisma.post.findMany({
+    where: {
+      createdAt: { gte: since },
+    },
+    include: {
+      bot: {
+        select: {
+          name: true,
+          handle: true,
+          avatarUrl: true,
+          colorAccent: true,
+        },
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 50,
+  })
 
-  if (!posts || posts.length === 0) {
+  if (posts.length === 0) {
     return []
   }
+
+  // Convert to snake_case for scoring engine
+  const postsSnake = posts.map((p) => toSnakeCase(p))
 
   // Score with engagement-heavy weights for trending
   const trendingWeights = {
@@ -251,7 +228,7 @@ export async function getTrendingPosts(limit: number = 5): Promise<ScoredPost[]>
     weights: trendingWeights,
   }
 
-  const ranked = rankPosts(posts as unknown as PostForScoring[], context)
+  const ranked = rankPosts(postsSnake as unknown as PostForScoring[], context)
 
   return ranked.slice(0, limit)
 }
@@ -275,15 +252,13 @@ export async function getFollowingFeed(
   userId: string,
   options: Omit<FeedOptions, 'userId'> = {}
 ): Promise<FeedResult> {
-  const supabase = getSupabaseAdmin()
-
   // Get followed bot IDs
-  const { data: follows } = await supabase
-    .from('follows')
-    .select('bot_id')
-    .eq('user_id', userId)
+  const follows = await prisma.follow.findMany({
+    where: { userId },
+    select: { botId: true },
+  })
 
-  if (!follows || follows.length === 0) {
+  if (follows.length === 0) {
     return {
       posts: [],
       nextCursor: null,
@@ -292,38 +267,39 @@ export async function getFollowingFeed(
     }
   }
 
-  const botIds = follows.map((f) => f.bot_id)
+  const botIds = follows.map((f) => f.botId)
 
   const { cursor, limit = 20, timeRange = 'all' } = options
 
-  let query = supabase
-    .from('posts')
-    .select(
-      `
-      id,
-      content,
-      created_at,
-      verification_status,
-      verification_note,
-      likes_count,
-      comments_count,
-      saves_count,
-      sources,
-      bot_id,
-      bots (id, name, handle, avatar_url, color_accent, expertise)
-    `
-    )
-    .in('bot_id', botIds)
-    .order('created_at', { ascending: false })
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const where: any = {
+    botId: { in: botIds },
+  }
 
   if (timeRange !== 'all') {
     const since = getTimeRangeSince(timeRange)
-    query = query.gte('created_at', since.toISOString())
+    where.createdAt = { gte: since }
   }
 
-  const { data: posts } = await query.limit(limit * 2)
+  const posts = await prisma.post.findMany({
+    where,
+    include: {
+      bot: {
+        select: {
+          id: true,
+          name: true,
+          handle: true,
+          avatarUrl: true,
+          colorAccent: true,
+          expertise: true,
+        },
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: limit * 2,
+  })
 
-  if (!posts) {
+  if (posts.length === 0) {
     return {
       posts: [],
       nextCursor: null,
@@ -332,8 +308,11 @@ export async function getFollowingFeed(
     }
   }
 
+  // Convert to snake_case for scoring engine
+  const postsSnake = posts.map((p) => toSnakeCase(p))
+
   const context = await buildScoringContext(userId)
-  const ranked = rankPosts(posts as unknown as PostForScoring[], context)
+  const ranked = rankPosts(postsSnake as unknown as PostForScoring[], context)
 
   let startIndex = 0
   if (cursor) {

@@ -1,30 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createServerClient } from '@supabase/ssr'
-import { cookies } from 'next/headers'
-
-async function getSupabase() {
-  const cookieStore = await cookies()
-  return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return cookieStore.getAll()
-        },
-        setAll(cookiesToSet) {
-          try {
-            cookiesToSet.forEach(({ name, value, options }) =>
-              cookieStore.set(name, value, options)
-            )
-          } catch {
-            // Ignore
-          }
-        },
-      },
-    }
-  )
-}
+import { prisma } from '@/lib/db'
+import { getAuthUserId, requireAuth } from '@/lib/data/get-user'
+import { toSnakeCase } from '@/lib/data/helpers'
 
 // GET /api/comments?postId=xxx - Get comments for a post
 export async function GET(request: NextRequest) {
@@ -35,55 +12,57 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'postId required' }, { status: 400 })
   }
 
-  const supabase = await getSupabase()
+  const comments = await prisma.comment.findMany({
+    where: { postId },
+    include: {
+      user: {
+        select: {
+          displayName: true,
+          avatarUrl: true,
+        },
+      },
+      bot: {
+        select: {
+          name: true,
+          handle: true,
+          avatarUrl: true,
+          colorAccent: true,
+        },
+      },
+    },
+    orderBy: { createdAt: 'asc' },
+  })
 
-  const { data: comments, error } = await supabase
-    .from('comments')
-    .select(
-      `
-      id,
-      content,
-      parent_id,
-      created_at,
-      user_id,
-      bot_id,
-      profiles:user_id (
-        display_name,
-        avatar_url
-      ),
-      bots:bot_id (
-        name,
-        handle,
-        avatar_url,
-        color_accent
-      )
-    `
-    )
-    .eq('post_id', postId)
-    .order('created_at', { ascending: true })
+  // Transform to snake_case and add nested structure
+  const commentsSnake = comments.map((c) => {
+    const snake = toSnakeCase(c)
+    // Rename relation keys: user → profiles, bot → bots (frontend expects these names)
+    snake.profiles = snake.user
+    snake.bots = snake.bot
+    delete snake.user
+    delete snake.bot
+    return snake
+  })
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
-  }
-
-  // Transform comments to nested structure
-  const commentMap = new Map()
-  const rootComments: typeof comments = []
+  // Build nested tree structure
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const commentMap = new Map<string, any>()
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rootComments: any[] = []
 
   // First pass: create map
-  comments?.forEach((comment) => {
+  commentsSnake.forEach((comment) => {
     commentMap.set(comment.id, { ...comment, replies: [] })
   })
 
   // Second pass: build tree
-  comments?.forEach((comment) => {
+  commentsSnake.forEach((comment) => {
     const commentWithReplies = commentMap.get(comment.id)
     if (comment.parent_id) {
       const parent = commentMap.get(comment.parent_id)
       if (parent) {
         parent.replies.push(commentWithReplies)
       } else {
-        // Parent not found, treat as root
         rootComments.push(commentWithReplies)
       }
     } else {
@@ -96,15 +75,9 @@ export async function GET(request: NextRequest) {
 
 // POST /api/comments - Create a new comment
 export async function POST(request: NextRequest) {
-  const supabase = await getSupabase()
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-
-  if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
+  const auth = await requireAuth(request)
+  if ('error' in auth) return auth.error
+  const { userId } = auth
 
   const body = await request.json()
   const { postId, content, parentId } = body
@@ -117,36 +90,33 @@ export async function POST(request: NextRequest) {
   }
 
   // Create comment
-  const { data: comment, error: insertError } = await supabase
-    .from('comments')
-    .insert({
-      post_id: postId,
-      user_id: user.id,
+  const comment = await prisma.comment.create({
+    data: {
+      postId,
+      userId,
       content: content.trim(),
-      parent_id: parentId || null,
-    })
-    .select(
-      `
-      id,
-      content,
-      parent_id,
-      created_at,
-      user_id,
-      bot_id,
-      profiles:user_id (
-        display_name,
-        avatar_url
-      )
-    `
-    )
-    .single()
-
-  if (insertError) {
-    return NextResponse.json({ error: insertError.message }, { status: 500 })
-  }
+      parentId: parentId || null,
+    },
+    include: {
+      user: {
+        select: {
+          displayName: true,
+          avatarUrl: true,
+        },
+      },
+    },
+  })
 
   // Increment comment count
-  await supabase.rpc('increment_comments', { p_post_id: postId })
+  await prisma.post.update({
+    where: { id: postId },
+    data: { commentsCount: { increment: 1 } },
+  })
 
-  return NextResponse.json({ success: true, comment })
+  // Convert to snake_case for frontend compatibility
+  const commentSnake = toSnakeCase(comment)
+  commentSnake.profiles = commentSnake.user
+  delete commentSnake.user
+
+  return NextResponse.json({ success: true, comment: commentSnake })
 }

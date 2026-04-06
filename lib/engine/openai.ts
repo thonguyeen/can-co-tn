@@ -12,7 +12,8 @@ function getClient(): OpenAI | null {
   if (client) return client;
   const apiKey = process.env.OPENAI_API_KEY;
   if (apiKey && apiKey !== 'not-set') {
-    client = new OpenAI({ apiKey });
+    const baseURL = process.env.OPENAI_BASE_URL;
+    client = new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });
     return client;
   }
   return null;
@@ -40,7 +41,7 @@ export async function parseSearchIntent(query: string): Promise<SearchIntent> {
 
   try {
     const response = await c.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
       temperature: 0,
       max_tokens: 500,
       messages: [
@@ -110,30 +111,45 @@ function emptyIntent(query: string): SearchIntent {
 }
 
 /**
- * Generate a title for an intent from raw_text
+ * Format raw intent text: Generate title and normalize Vietnamese diacritics
  */
-export async function generateIntentTitle(rawText: string, type: 'CAN' | 'CO'): Promise<string> {
+export async function formatIntentContent(rawText: string, type: 'CAN' | 'CO'): Promise<{ title: string, normalized_text: string }> {
   const c = getClient();
   if (!c) {
-    return rawText.slice(0, 100);
+    return { title: rawText.slice(0, 100), normalized_text: rawText };
   }
 
   try {
     const response = await c.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
       temperature: 0,
-      max_tokens: 100,
+      max_tokens: 500,
       messages: [
         {
           role: 'system',
-          content: `Tạo tiêu đề ngắn gọn (tối đa 80 ký tự) cho bài đăng ${type === 'CAN' ? 'CẦN' : 'CÓ'} trên mạng xã hội CẦN & CÓ. Chỉ trả về tiêu đề, không giải thích.`,
+          content: `Bạn là trợ lý cho nền tảng mạng xã hội BẤT ĐỘNG SẢN CẦN & CÓ.
+Nhiệm vụ của bạn:
+1. Tạo một tiêu đề ngắn gọn (tối đa 80 ký tự) cho bài đăng ${type === 'CAN' ? 'CẦN' : 'CÓ'}.
+2. "Dịch" lại phần văn bản gốc sang tiếng Việt có dấu chuẩn chỉnh (thêm dấu câu, sửa lỗi chính tả nếu cần), giữ nguyên giọng văn cốt lõi của người bán/thuê. TRẢ VỀ CHÍNH XÁC cấu trúc JSON sau:
+{"title": "...", "normalized_text": "..."}`,
         },
         { role: 'user', content: rawText },
       ],
     });
 
-    return response.choices[0]?.message?.content?.trim() || rawText.slice(0, 100);
-  } catch {
-    return rawText.slice(0, 100);
+    const content = response.choices[0]?.message?.content?.trim();
+    if (!content) return { title: rawText.slice(0, 100), normalized_text: rawText };
+
+    // Extract JSON block if surrounded by markdown
+    const match = content.match(/\{[\s\S]*\}/);
+    if (!match) return { title: rawText.slice(0, 100), normalized_text: rawText };
+
+    const parsed = JSON.parse(match[0]);
+    return {
+      title: parsed.title || rawText.slice(0, 100),
+      normalized_text: parsed.normalized_text || rawText,
+    };
+  } catch (err) {
+    return { title: rawText.slice(0, 100), normalized_text: rawText };
   }
 }

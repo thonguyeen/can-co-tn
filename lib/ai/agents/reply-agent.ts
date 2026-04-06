@@ -1,13 +1,6 @@
 import { chat } from '../client'
 import { BOT_PERSONAS, getBotById } from '../prompts/bot-personas'
-import { createClient } from '@supabase/supabase-js'
-
-function getSupabaseAdmin() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
-}
+import { prisma } from '@/lib/db'
 
 interface CommentContext {
   postContent: string
@@ -154,26 +147,21 @@ export async function saveBotReply(
   parentCommentId?: string
 ): Promise<{ success: boolean; commentId?: string; error?: string }> {
   try {
-    const supabase = getSupabaseAdmin()
+    const data = await prisma.$queryRaw<any[]>`
+      INSERT INTO comments (post_id, bot_id, user_id, content, parent_id)
+      VALUES (${postId}::uuid, ${botId}, null, ${content}, ${parentCommentId ? `${parentCommentId}::uuid` : null})
+      RETURNING id
+    `
+    const commentId = data[0]?.id
 
-    const { data, error } = await supabase
-      .from('comments')
-      .insert({
-        post_id: postId,
-        bot_id: botId,
-        user_id: null,
-        content: content,
-        parent_id: parentCommentId || null,
-      })
-      .select('id')
-      .single()
-
-    if (error) throw error
+    if (!commentId) throw new Error('Failed to create comment')
 
     // Update comment count
-    await supabase.rpc('increment_comments', { p_post_id: postId })
+    await prisma.$executeRaw`
+      UPDATE posts SET comments_count = COALESCE(comments_count, 0) + 1 WHERE id = ${postId}::uuid
+    `
 
-    return { success: true, commentId: data.id }
+    return { success: true, commentId }
   } catch (error) {
     console.error('Save reply error:', error)
     return {
@@ -193,30 +181,20 @@ export async function processAndReplyToComment(commentId: string): Promise<{
   error?: string
 }> {
   try {
-    const supabase = getSupabaseAdmin()
-
     // 1. Fetch the comment with context
-    const { data: comment, error: commentError } = await supabase
-      .from('comments')
-      .select(
-        `
-        id,
-        content,
-        post_id,
-        parent_id,
-        user_id,
-        profiles:user_id (display_name),
-        posts:post_id (
-          content,
-          verification_status,
-          bot_id
-        )
-      `
-      )
-      .eq('id', commentId)
-      .single()
+    const commentData = await prisma.$queryRaw<any[]>`
+      SELECT c.id, c.content, c.post_id, c.parent_id, c.user_id, 
+             u.display_name as user_name,
+             p.content as post_content, p.verification_status as post_verification_status, p.bot_id as post_bot_id
+      FROM comments c
+      LEFT JOIN profiles u ON c.user_id = u.id
+      LEFT JOIN posts p ON c.post_id = p.id
+      WHERE c.id = ${commentId}::uuid
+      LIMIT 1
+    `
+    const comment = commentData[0]
 
-    if (commentError || !comment) {
+    if (!comment) {
       throw new Error('Comment not found')
     }
 
@@ -225,41 +203,27 @@ export async function processAndReplyToComment(commentId: string): Promise<{
       return { success: true } // Don't reply to bot comments
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const post = comment.posts as any
-    const botId = post.bot_id
+    const botId = comment.post_bot_id
 
     // 2. Get previous comments for context
-    const { data: previousComments } = await supabase
-      .from('comments')
-      .select(
-        `
-        content,
-        user_id,
-        bot_id,
-        profiles:user_id (display_name),
-        bots:bot_id (name)
-      `
-      )
-      .eq('post_id', comment.post_id)
-      .lt('created_at', new Date().toISOString())
-      .order('created_at', { ascending: false })
-      .limit(5)
+    const previousComments = await prisma.$queryRaw<any[]>`
+      SELECT c.content, c.user_id, c.bot_id, u.display_name as user_name, b.name as bot_name
+      FROM comments c
+      LEFT JOIN profiles u ON c.user_id = u.id
+      LEFT JOIN bots b ON c.bot_id = b.id
+      WHERE c.post_id = ${comment.post_id}::uuid AND c.created_at < NOW()
+      ORDER BY c.created_at DESC
+      LIMIT 5
+    `
 
     // 3. Build context
     const context: CommentContext = {
-      postContent: post.content,
-      postVerificationStatus: post.verification_status,
+      postContent: comment.post_content,
+      postVerificationStatus: comment.post_verification_status,
       commentContent: comment.content,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      commenterName: (comment.profiles as any)?.display_name || 'Người dùng',
+      commenterName: comment.user_name || 'Người dùng',
       previousComments: previousComments?.map((c) => ({
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        author: c.bot_id
-          ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            (c.bots as any)?.name || 'Bot'
-          : // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            (c.profiles as any)?.display_name || 'User',
+        author: c.bot_id ? c.bot_name || 'Bot' : c.user_name || 'User',
         isBot: !!c.bot_id,
         content: c.content,
       })),

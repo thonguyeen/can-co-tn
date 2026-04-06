@@ -3,7 +3,7 @@
 // Decides which bots comment when, enforces anti-spam
 // ═══════════════════════════════════════════════════════
 
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { prisma } from '@/lib/db';
 import { BOT_PERSONAS, type BotPersona } from './personas';
 import { generateComment } from './comment-generator';
 import type { Intent } from '@/lib/engine/types';
@@ -26,7 +26,6 @@ const MAX_BOTS_PER_INTENT = 3;
 
 export async function orchestrate(
   trigger: AgentTrigger,
-  supabase?: SupabaseClient,
 ): Promise<AgentAction[]> {
   const actions: AgentAction[] = [];
   const intent = trigger.intentData;
@@ -85,7 +84,7 @@ export async function orchestrate(
   }
 
   // Enforce spam limits
-  return enforceSpamLimits(actions, trigger.intentId || '', supabase);
+  return enforceSpamLimits(actions, trigger.intentId || '');
 }
 
 function addAction(
@@ -111,22 +110,20 @@ function addAction(
 async function enforceSpamLimits(
   actions: AgentAction[],
   intentId: string,
-  supabase?: SupabaseClient,
 ): Promise<AgentAction[]> {
   let existingCount = 0;
   const existingBotIds = new Set<string>();
 
-  if (supabase && intentId) {
-    const { data } = await supabase
-      .from('intent_comments')
-      .select('bot_name')
-      .eq('intent_id', intentId)
-      .eq('is_bot', true);
+  if (intentId) {
+    const existing = await prisma.intentComment.findMany({
+      where: { intentId, isBot: true },
+      select: { botName: true },
+    });
 
-    if (data) {
-      existingCount = data.length;
-      data.forEach((d) => existingBotIds.add(d.bot_name));
-    }
+    existingCount = existing.length;
+    existing.forEach((d) => {
+      if (d.botName) existingBotIds.add(d.botName);
+    });
   }
 
   const remaining = MAX_BOTS_PER_INTENT - existingCount;
@@ -142,30 +139,30 @@ async function enforceSpamLimits(
  */
 export async function executeActions(
   actions: AgentAction[],
-  supabase: SupabaseClient,
 ): Promise<void> {
   for (const action of actions) {
     // Create bot comment
-    const { data: comment } = await supabase
-      .from('intent_comments')
-      .insert({
-        intent_id: action.intentId,
-        is_bot: true,
-        bot_name: action.botId,
+    const comment = await prisma.intentComment.create({
+      data: {
+        intentId: action.intentId,
+        isBot: true,
+        botName: action.botId,
         content: action.comment,
-      })
-      .select('id')
-      .single();
+      },
+      select: { id: true },
+    });
 
-    // Log activity (best-effort, table may not exist)
+    // Log activity (best-effort)
     try {
-      await supabase.from('agent_activity').insert({
-        bot_id: action.botId,
-        event: action.reason,
-        intent_id: action.intentId,
-        action: 'commented',
-        comment_id: comment?.id || null,
-        reason: action.reason,
+      await prisma.agentActivity.create({
+        data: {
+          botId: action.botId,
+          event: action.reason,
+          intentId: action.intentId,
+          action: 'commented',
+          commentId: comment?.id || null,
+          reason: action.reason,
+        },
       });
     } catch {
       // Non-critical

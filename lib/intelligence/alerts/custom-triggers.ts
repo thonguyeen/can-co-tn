@@ -5,13 +5,8 @@
 // User-defined alert conditions with complex logic
 //
 
-import { createClient } from '@supabase/supabase-js';
+import { prisma } from '@/lib/db';
 import { getOpenClawClient } from '@/lib/openclaw/client';
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
 
 export type TriggerType =
   | 'keyword'           // Keyword match in news
@@ -72,50 +67,34 @@ export async function createTrigger(
   userId: string,
   trigger: Omit<AlertTrigger, 'id' | 'userId' | 'triggerCount' | 'createdAt'>
 ): Promise<AlertTrigger> {
-  const { data, error } = await supabase
-    .from('alert_triggers')
-    .insert({
-      user_id: userId,
-      name: trigger.name,
-      description: trigger.description,
-      type: trigger.type,
-      conditions: trigger.conditions,
-      logic: trigger.logic || 'and',
-      is_active: trigger.isActive ?? true,
-      channel: trigger.channel,
-      cooldown_minutes: trigger.cooldownMinutes || 60,
-      trigger_count: 0,
-    })
-    .select()
-    .single();
-
-  if (error) throw error;
+  const result = await prisma.$queryRaw<any[]>`
+    INSERT INTO alert_triggers (user_id, name, description, type, conditions, logic, is_active, channel, cooldown_minutes, trigger_count)
+    VALUES (${userId}, ${trigger.name}, ${trigger.description}, ${trigger.type}, ${JSON.stringify(trigger.conditions)}::jsonb, ${trigger.logic || 'and'}, ${trigger.isActive ?? true}, ${trigger.channel || null}, ${trigger.cooldownMinutes || 60}, 0)
+    RETURNING *
+  `;
+  const data = result[0];
 
   return mapToAlertTrigger(data);
 }
 
 export async function getUserTriggers(userId: string): Promise<AlertTrigger[]> {
-  const { data } = await supabase
-    .from('alert_triggers')
-    .select('*')
-    .eq('user_id', userId)
-    .order('created_at', { ascending: false });
+  const data = await prisma.$queryRaw<any[]>`
+    SELECT * FROM alert_triggers WHERE user_id = ${userId} ORDER BY created_at DESC
+  `;
 
   return (data || []).map(mapToAlertTrigger);
 }
 
 export async function toggleTrigger(triggerId: string, isActive: boolean): Promise<void> {
-  await supabase
-    .from('alert_triggers')
-    .update({ is_active: isActive })
-    .eq('id', triggerId);
+  await prisma.$executeRaw`
+    UPDATE alert_triggers SET is_active = ${isActive} WHERE id = ${triggerId}::uuid
+  `;
 }
 
 export async function deleteTrigger(triggerId: string): Promise<void> {
-  await supabase
-    .from('alert_triggers')
-    .delete()
-    .eq('id', triggerId);
+  await prisma.$executeRaw`
+    DELETE FROM alert_triggers WHERE id = ${triggerId}::uuid
+  `;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -126,10 +105,9 @@ export async function evaluateTriggers(
   context: Record<string, unknown>
 ): Promise<TriggerEvaluation[]> {
   // Get all active triggers
-  const { data: triggers } = await supabase
-    .from('alert_triggers')
-    .select('*')
-    .eq('is_active', true);
+  const triggers = await prisma.$queryRaw<any[]>`
+    SELECT * FROM alert_triggers WHERE is_active = true
+  `;
 
   if (!triggers || triggers.length === 0) return [];
 
@@ -152,13 +130,11 @@ export async function evaluateTriggers(
       evaluations.push(evaluation);
 
       // Update trigger stats
-      await supabase
-        .from('alert_triggers')
-        .update({
-          last_triggered_at: new Date().toISOString(),
-          trigger_count: trigger.trigger_count + 1,
-        })
-        .eq('id', trigger.id);
+      await prisma.$executeRaw`
+        UPDATE alert_triggers 
+        SET last_triggered_at = NOW(), trigger_count = trigger_count + 1
+        WHERE id = ${trigger.id}::uuid
+      `;
     }
   }
 
@@ -253,21 +229,19 @@ function getNestedValue(obj: Record<string, unknown>, path: string): unknown {
 export async function executeTriggerAlert(
   evaluation: TriggerEvaluation
 ): Promise<void> {
-  const { data: trigger } = await supabase
-    .from('alert_triggers')
-    .select('*')
-    .eq('id', evaluation.triggerId)
-    .single();
+  const triggerList = await prisma.$queryRaw<any[]>`
+    SELECT * FROM alert_triggers WHERE id = ${evaluation.triggerId}::uuid LIMIT 1
+  `;
+  const trigger = triggerList[0];
 
   if (!trigger) return;
 
   // Get user's channel
-  const { data: channel } = await supabase
-    .from('user_channels')
-    .select('channel, channel_id, preferences')
-    .eq('user_id', trigger.user_id)
-    .eq('is_primary', true)
-    .maybeSingle();
+  const channels = await prisma.$queryRaw<any[]>`
+    SELECT channel, channel_id, preferences FROM user_channels 
+    WHERE user_id = ${trigger.user_id} AND is_primary = true LIMIT 1
+  `;
+  const channel = channels[0];
 
   if (!channel) return;
 
@@ -282,12 +256,10 @@ export async function executeTriggerAlert(
   });
 
   // Log alert
-  await supabase.from('trigger_alerts').insert({
-    trigger_id: evaluation.triggerId,
-    user_id: trigger.user_id,
-    context: evaluation.context,
-    channel: channel.channel,
-  });
+  await prisma.$executeRaw`
+    INSERT INTO trigger_alerts (trigger_id, user_id, context, channel)
+    VALUES (${evaluation.triggerId}::uuid, ${trigger.user_id}, ${JSON.stringify(evaluation.context)}::jsonb, ${channel.channel})
+  `;
 }
 
 function formatTriggerAlert(
@@ -387,8 +359,8 @@ function mapToAlertTrigger(data: Record<string, unknown>): AlertTrigger {
     isActive: data.is_active as boolean,
     channel: data.channel as string | undefined,
     cooldownMinutes: data.cooldown_minutes as number,
-    lastTriggeredAt: data.last_triggered_at as string | undefined,
+    lastTriggeredAt: data.last_triggered_at?.toString() as string | undefined,
     triggerCount: data.trigger_count as number,
-    createdAt: data.created_at as string,
+    createdAt: data.created_at?.toString() as string || new Date().toISOString(),
   };
 }

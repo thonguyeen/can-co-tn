@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { cn } from '@/lib/utils'
-import { createClient } from '@/lib/supabase/client'
+import { signOut } from 'next-auth/react'
 import { useRouter } from 'next/navigation'
 
 interface HeaderProps {
@@ -22,12 +22,8 @@ interface HeaderProps {
 export function Header({ user }: HeaderProps) {
   const pathname = usePathname()
   const router = useRouter()
-  const supabase = createClient()
-
   const handleLogout = async () => {
-    await supabase.auth.signOut()
-    router.push('/login')
-    router.refresh()
+    await signOut({ callbackUrl: '/login' })
   }
 
   const navItems = [

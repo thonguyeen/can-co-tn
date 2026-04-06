@@ -55,6 +55,17 @@ const BOT_TEMPLATES: BotTemplate[] = [
     tonePool: ['passionate', 'competitive', 'chill', 'analytical'],
     colorPool: ['#EF4444', '#F97316', '#FBBF24', '#84CC16'],
   },
+  {
+    category: 'real_estate',
+    namePrefix: 'BĐS',
+    expertisePool: [
+      'Căn hộ chung cư', 'Nhà phố', 'Biệt thự', 'Đất nền',
+      'Văn phòng cho thuê', 'Mặt bằng kinh doanh',
+      'Nhà trọ phòng trọ', 'Khu công nghiệp',
+    ],
+    tonePool: ['professional', 'friendly', 'data-driven', 'local-expert'],
+    colorPool: ['#059669', '#0D9488', '#0891B2', '#2563EB'],
+  },
 ];
 
 // Vietnamese name parts for generating unique names
@@ -127,6 +138,35 @@ export class BotFactory {
     return allBots;
   }
 
+  // Generate an Envoy Bot (Nhân Viên Môi Giới)
+  generateEnvoyBot(options: {
+    province: string;
+    provinceCode: string;
+    district?: string;
+    districtCode?: string;
+    ward?: string;
+    wardCode?: string;
+    category?: string;
+    quota?: number;
+  }): GeneratedBot {
+    const template = BOT_TEMPLATES.find(t => t.category === 'real_estate')!;
+    const bot = this.generateBot(template);
+
+    // Gán thông tin Envoy
+    bot.isEnvoy = true;
+    bot.assignedProvince = options.province;
+    bot.assignedProvinceCode = options.provinceCode;
+    bot.assignedDistrict = options.district;
+    bot.assignedDistrictCode = options.districtCode;
+    bot.assignedWard = options.ward;
+    bot.assignedWardCode = options.wardCode;
+    bot.assignedCategories = [options.category || 'real_estate'];
+    bot.dailyQuota = options.quota || 10;
+    bot.postsToday = 0;
+
+    return bot;
+  }
+
   // Get all generated bots
   getAllBots(): GeneratedBot[] {
     return Array.from(this.generatedBots.values());
@@ -139,6 +179,11 @@ export class BotFactory {
 
   // Generate system prompt for a bot
   generateSystemPrompt(bot: GeneratedBot): string {
+    // Dùng prompt Envoy nếu là Bot Môi Giới
+    if (bot.isEnvoy) {
+      return this.generateEnvoySystemPrompt(bot);
+    }
+
     return `Bạn là ${bot.nameVi} (@${bot.handle}), một AI bot trên mạng xã hội FACEBOT.
 
 ## Thông tin
@@ -168,6 +213,27 @@ Bạn là chuyên gia trong lĩnh vực ${bot.category}. Bạn:
 - Hashtags: 2-4 tags liên quan`;
   }
 
+  // System prompt chuyên biệt cho Envoy Bot (Môi Giới BĐS)
+  generateEnvoySystemPrompt(bot: GeneratedBot): string {
+    const region = [bot.assignedWard, bot.assignedDistrict, bot.assignedProvince]
+      .filter(Boolean).join(', ');
+
+    return `Bạn là ${bot.nameVi} (@${bot.handle}), nhân viên môi giới BĐS AI tại ${region || 'Việt Nam'}.
+
+## Vai trò
+- Chuyên gia BĐS khu vực ${region || 'toàn quốc'}
+- Đăng tin CẦN (tìm mua/thuê) hoặc CÓ (bán/cho thuê) BĐS
+- Tư vấn giá cả, pháp lý, quy hoạch khu vực
+
+## Quy tắc viết bài
+1. Viết tiếng Việt tự nhiên, có dấu
+2. Nêu rõ: Loại BĐS, Giá, Diện tích, Vị trí
+3. Giọng điệu: chuyên nghiệp, đáng tin cậy
+4. Tối đa 500 ký tự
+5. KHÔNG bịa thông tin. Chỉ đăng dựa trên dữ liệu được cung cấp.
+6. Kết thúc bằng thông tin liên hệ hoặc nguồn tham khảo.`;
+  }
+
   private pickRandom<T>(array: T[], count: number): T[] {
     const shuffled = [...array].sort(() => Math.random() - 0.5);
     return shuffled.slice(0, count);
@@ -195,6 +261,17 @@ export interface GeneratedBot {
     debatesCount: number;
     followersCount: number;
   };
+  // ── Envoy fields (Bot Môi Giới) ──
+  isEnvoy?: boolean;
+  assignedProvince?: string;
+  assignedProvinceCode?: string;
+  assignedDistrict?: string;
+  assignedDistrictCode?: string;
+  assignedWard?: string;
+  assignedWardCode?: string;
+  assignedCategories?: string[];
+  dailyQuota?: number;
+  postsToday?: number;
 }
 
 // ═══════════════════════════════════════════════════════════════

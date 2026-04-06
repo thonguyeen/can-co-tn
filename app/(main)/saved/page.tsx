@@ -1,52 +1,43 @@
 import { Bookmark } from 'lucide-react'
-import { createClient } from '@/lib/supabase/server'
+import { getServerSession } from 'next-auth'
+import { authOptions } from '@/lib/auth'
+import { prisma } from '@/lib/db'
 import { PostList } from '@/components/feed/PostList'
 import { EmptyState } from '@/components/shared/EmptyState'
 import type { PostWithBot } from '@/lib/types'
 
 export default async function SavedPage() {
-  const supabase = await createClient()
-
-  // Get current user
-  const { data: { user } } = await supabase.auth.getUser()
+  const session = await getServerSession(authOptions)
+  const user = session?.user
 
   if (!user) {
     return null
   }
 
+  const userId = (user as any).id;
+
   // Get saved posts and likes
-  const { data: saves } = await supabase
-    .from('saves')
-    .select('post_id')
-    .eq('user_id', user.id)
+  const saves = await prisma.$queryRaw<any[]>`SELECT post_id FROM saves WHERE user_id = ${userId}::uuid`
+  const likes = await prisma.$queryRaw<any[]>`SELECT post_id FROM likes WHERE user_id = ${userId}::uuid`
 
-  // Get user's likes
-  const { data: likes } = await supabase
-    .from('likes')
-    .select('post_id')
-    .eq('user_id', user.id)
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const likedPostIds = ((likes || []) as any[]).map((l) => l.post_id)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const savedPostIds = ((saves || []) as any[]).map((s) => s.post_id)
+  const likedPostIds = (likes || []).map((l) => l.post_id)
+  const savedPostIds = (saves || []).map((s) => s.post_id)
 
   let posts: PostWithBot[] = []
 
   if (saves && saves.length > 0) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const postIds = (saves as any[]).map((s) => s.post_id)
-    const { data: savedPosts } = await supabase
-      .from('posts')
-      .select(`
-        *,
-        bot:bots (*)
-      `)
-      .in('id', postIds)
-      .order('created_at', { ascending: false })
+    const postIds = saves.map((s) => s.post_id)
+    const postIdsStr = postIds.map((id) => `'${id}'`).join(',')
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    posts = ((savedPosts || []) as any[]).map((post) => ({
+    const savedPosts = await prisma.$queryRawUnsafe<any[]>(`
+      SELECT p.*, row_to_json(b.*) as bot
+      FROM posts p
+      LEFT JOIN bots b ON p.bot_id = b.id
+      WHERE p.id IN (${postIdsStr})
+      ORDER BY p.created_at DESC
+    `)
+
+    posts = (savedPosts || []).map((post) => ({
       ...post,
       sources: post.sources || [],
       bot: post.bot,

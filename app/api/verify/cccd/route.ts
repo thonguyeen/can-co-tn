@@ -1,65 +1,74 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { getAuthUserId } from '@/lib/data/get-user';
+import { prisma } from '@/lib/db';
+import { Prisma } from '@prisma/client';
+import { toSnakeCase } from '@/lib/data/helpers';
 import { processCccd } from '@/lib/engine/ocr';
 import { calculateTrustScore, calculateLevel } from '@/lib/engine/trust';
 import type { Verification } from '@/lib/engine/types';
+import { promises as fs } from 'fs';
+import path from 'path';
 
 // POST /api/verify/cccd — upload + OCR CCCD
 export async function POST(request: NextRequest) {
-  const supabase = await createClient();
+  try {
+    const userId = await getAuthUserId(request);
+    if (!userId) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
 
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const formData = await request.formData();
+    const file = formData.get('image') as File;
+    const intentId = formData.get('intent_id') as string | null;
+
+    if (!file) {
+      return NextResponse.json({ error: 'image file required' }, { status: 400 });
+    }
+
+    const buffer = Buffer.from(await file.arrayBuffer());
+
+    // Upload to Local Storage (replaces Supabase until S3/R2 migration)
+    const uploadDir = path.join(process.cwd(), 'public', 'uploads', 'verification-scans', 'cccd', userId);
+    await fs.mkdir(uploadDir, { recursive: true });
+    
+    const fileName = `${Date.now()}.jpg`;
+    const filePath = path.join(uploadDir, fileName);
+    await fs.writeFile(filePath, buffer);
+    
+    const publicUrl = `/uploads/verification-scans/cccd/${userId}/${fileName}`;
+
+    // Process OCR
+    const ocrData = await processCccd(buffer);
+
+    // Create verification record — Prisma
+    const verification = await prisma.verification.create({
+      data: {
+        userId,
+        intentId: intentId || null,
+        type: 'cccd',
+        status: 'pending',
+        data: ocrData as unknown as Prisma.InputJsonValue,
+        imageUrl: publicUrl,
+      },
+    });
+
+    // Recalculate trust score
+    const allVerifications = await prisma.verification.findMany({
+      where: { userId },
+    });
+
+    if (allVerifications.length > 0) {
+      const score = calculateTrustScore(allVerifications as unknown as Verification[]);
+      const level = calculateLevel(score);
+      await prisma.profile.update({
+        where: { id: userId },
+        data: { trustScore: score, verificationLevel: level },
+      });
+    }
+
+    return NextResponse.json({ verification: toSnakeCase(verification), ocr: ocrData }, { status: 201 });
+  } catch (error) {
+    console.error('OCR API Error:', error);
+    return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
   }
-
-  const formData = await request.formData();
-  const file = formData.get('image') as File;
-  const intentId = formData.get('intent_id') as string | null;
-
-  if (!file) {
-    return NextResponse.json({ error: 'image file required' }, { status: 400 });
-  }
-
-  const buffer = Buffer.from(await file.arrayBuffer());
-
-  // Upload to storage
-  const path = `cccd/${user.id}/${Date.now()}.jpg`;
-  await supabase.storage.from('verification-scans').upload(path, buffer, { contentType: file.type });
-  const { data: { publicUrl } } = supabase.storage.from('verification-scans').getPublicUrl(path);
-
-  // Process OCR
-  const ocrData = await processCccd(buffer);
-
-  // Create verification record
-  const { data: verification, error } = await supabase
-    .from('verifications')
-    .insert({
-      user_id: user.id,
-      intent_id: intentId || null,
-      type: 'cccd',
-      status: 'pending',
-      data: ocrData,
-      image_url: publicUrl,
-    })
-    .select()
-    .single();
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
-
-  // Recalculate trust score
-  const { data: allVerifications } = await supabase
-    .from('verifications')
-    .select('*')
-    .eq('user_id', user.id);
-
-  if (allVerifications) {
-    const score = calculateTrustScore(allVerifications as Verification[]);
-    const level = calculateLevel(score);
-    await supabase.from('profiles').update({ trust_score: score, verification_level: level }).eq('id', user.id);
-  }
-
-  return NextResponse.json({ verification, ocr: ocrData }, { status: 201 });
 }

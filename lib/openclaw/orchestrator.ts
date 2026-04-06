@@ -7,9 +7,14 @@ import { getOpenClawClient, OpenClawClient } from './client';
 import { getSessionManager, SessionManager } from './sessions';
 import { getBotFactory, BotFactory, GeneratedBot } from './bot-factory';
 import { getDistributionManager } from './distribution';
-import { savePost, saveComment, saveDebate, logActivity } from './persistence';
+import {
+  savePost, saveComment, saveDebate, logActivity,
+  saveIntentFromBot, checkBotQuota, incrementPostsToday, checkDuplicate,
+  matchBotToRegion,
+} from './persistence';
 import { DEEP_PERSONAS } from './deep-persona';
 import { getNewsReactor, NewsReactor } from './news-reactor';
+import { chatWithJSON } from '@/lib/ai/client';
 
 // ═══════════════════════════════════════════════════════════════
 // ORCHESTRATOR CONFIG
@@ -31,6 +36,7 @@ interface OrchestratorConfig {
   enableAutoCommenting: boolean;
   enableDebates: boolean;
   enableInterBotChat: boolean;
+  dryRun: boolean;  // true = chế độ Test (chỉ log, không đăng thật)
 }
 
 const DEFAULT_CONFIG: OrchestratorConfig = {
@@ -44,6 +50,7 @@ const DEFAULT_CONFIG: OrchestratorConfig = {
   enableAutoCommenting: true,
   enableDebates: true,
   enableInterBotChat: true,
+  dryRun: false,  // Mặc định: chế độ LIVE (đăng thật)
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -80,6 +87,17 @@ interface DebateRound {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// UTILITY: Strip <think> tags from LLM output
+// ═══════════════════════════════════════════════════════════════
+
+function stripThinkTags(content: string): string {
+  return content
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<\/?think>/gi, '')
+    .trim();
+}
+
+// ═══════════════════════════════════════════════════════════════
 // ORCHESTRATOR CLASS
 // ═══════════════════════════════════════════════════════════════
 
@@ -99,6 +117,7 @@ export class BotOrchestrator {
   private debateTimer: NodeJS.Timeout | null = null;
 
   private isRunning = false;
+  private startedAt: number | null = null;
   private activityQueue: Activity[] = [];
 
   constructor(config?: Partial<OrchestratorConfig>) {
@@ -116,8 +135,10 @@ export class BotOrchestrator {
   async start(): Promise<void> {
     if (this.isRunning) return;
 
-    console.log('[Orchestrator] Starting bot orchestration...');
+    const mode = this.config.dryRun ? 'TEST (dry-run)' : 'LIVE';
+    console.log(`[Orchestrator] Starting bot orchestration in ${mode} mode...`);
     this.isRunning = true;
+    this.startedAt = Date.now();
 
     // Connect to OpenClaw
     if (!this.client.isConnected()) {
@@ -141,11 +162,12 @@ export class BotOrchestrator {
     // Start news reactor
     this.newsReactor.start();
 
-    console.log('[Orchestrator] Bot orchestration started (with news reactor)');
+    console.log(`[Orchestrator] Bot orchestration started in ${mode} mode (with news reactor)`);
   }
 
   stop(): void {
     this.isRunning = false;
+    this.startedAt = null;
 
     if (this.postTimer) clearInterval(this.postTimer);
     if (this.commentTimer) clearInterval(this.commentTimer);
@@ -155,6 +177,19 @@ export class BotOrchestrator {
     this.newsReactor.stop();
 
     console.log('[Orchestrator] Bot orchestration stopped');
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // MODE CONTROL
+  // ═══════════════════════════════════════════════════════════════
+
+  setMode(dryRun: boolean): void {
+    this.config.dryRun = dryRun;
+    console.log(`[Orchestrator] Mode switched to: ${dryRun ? 'TEST (dry-run)' : 'LIVE'}`);
+  }
+
+  isDryRun(): boolean {
+    return this.config.dryRun;
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -218,6 +253,12 @@ export class BotOrchestrator {
       activity.content = content;
       activity.status = 'completed';
       activity.completedAt = Date.now();
+
+      // Skip database save if in dryRun mode
+      if (this.config.dryRun) {
+        console.log(`[Orchestrator][TEST] @${botHandle} generated: ${content.slice(0, 50)}... (NOT SAVED)`);
+        return activity;
+      }
 
       // Save to database
       const postId = await savePost({
@@ -313,6 +354,12 @@ export class BotOrchestrator {
       activity.content = content;
       activity.status = 'completed';
       activity.completedAt = Date.now();
+
+      // Skip database save if in dryRun mode
+      if (this.config.dryRun) {
+        console.log(`[Orchestrator][TEST] @${botHandle} commented: ${content.slice(0, 50)}... (NOT SAVED)`);
+        return activity;
+      }
 
       // Save to database
       const commentId = await saveComment({
@@ -442,6 +489,12 @@ export class BotOrchestrator {
 
       debate.status = 'completed';
       console.log(`[Orchestrator] Debate completed: ${debate.rounds.length} rounds`);
+
+      // Skip database save if in dryRun mode
+      if (this.config.dryRun) {
+        console.log(`[Orchestrator][TEST] Debate completed on "${topic}" (NOT SAVED)`);
+        return debate;
+      }
 
       // Save to database
       const debateId = await saveDebate({
@@ -704,12 +757,176 @@ Viết response của bạn (2-4 câu). Có thể mention người khác (@handl
   }
 
   // ═══════════════════════════════════════════════════════════════
+  // ENVOY BOT POSTING (Ghi vào bảng intents)
+  // ═══════════════════════════════════════════════════════════════
+
+  async createEnvoyPost(
+    botHandle: string,
+    options?: {
+      topic?: string;
+      type?: 'CAN' | 'CO';
+      source_url?: string;
+      province?: string;
+      district?: string;
+      ward?: string;
+      city?: string;
+      price?: number;
+    }
+  ): Promise<Activity> {
+    const activity: Activity = {
+      id: `envoy_${Date.now()}_${botHandle}`,
+      type: 'post',
+      botHandle,
+      status: 'pending',
+      createdAt: Date.now(),
+    };
+
+    this.activities.set(activity.id, activity);
+    this.activeBots.add(botHandle);
+
+    try {
+      activity.status = 'running';
+
+      // 1. Check quota
+      const quota = await checkBotQuota(botHandle);
+      if (!quota.allowed) {
+        console.log(`[Orchestrator] @${botHandle} đã đạt quota (${quota.postsToday}/${quota.dailyQuota})`);
+        activity.status = 'failed';
+        activity.error = `Quota exceeded: ${quota.postsToday}/${quota.dailyQuota}`;
+        return activity;
+      }
+
+      // 2. Check duplicate (nếu có source_url)
+      if (options?.source_url) {
+        const isDup = await checkDuplicate(options.source_url);
+        if (isDup) {
+          console.log(`[Orchestrator] Duplicate source_url: ${options.source_url}`);
+          activity.status = 'failed';
+          activity.error = 'Duplicate source_url';
+          return activity;
+        }
+      }
+
+      // 3. Generate content
+      const postTopic = options?.topic || 'Tin BĐS mới nhất khu vực';
+      const rawContent = await this.sessionManager.generatePost(botHandle, postTopic, 'medium');
+      const cleanContent = stripThinkTags(rawContent);
+
+      // 4. Parse title (dòng đầu hoặc 120 ký tự đầu)
+      const title = cleanContent.split('\n')[0].slice(0, 120) || postTopic;
+
+      // 5. Save to intents table
+      const intentId = await saveIntentFromBot({
+        botHandle,
+        title,
+        type: options?.type || 'CO',
+        content: cleanContent,
+        source_url: options?.source_url,
+        province: options?.province,
+        district: options?.district,
+        ward: options?.ward,
+        city: options?.city,
+        price: options?.price,
+      });
+
+      // 6. Update quota counter
+      await incrementPostsToday(botHandle);
+
+      activity.content = cleanContent;
+      activity.status = 'completed';
+      activity.completedAt = Date.now();
+      activity.targetId = intentId || undefined;
+
+      // 7. Log
+      await logActivity({
+        type: 'post',
+        botHandle,
+        targetId: intentId || undefined,
+        content: cleanContent,
+      });
+
+      console.log(`[Orchestrator] @${botHandle} envoy posted: ${title.slice(0, 50)}...`);
+      return activity;
+    } catch (error) {
+      activity.status = 'failed';
+      activity.error = error instanceof Error ? error.message : 'Unknown error';
+      console.error(`[Orchestrator] Envoy post failed for @${botHandle}:`, activity.error);
+      return activity;
+    } finally {
+      this.activeBots.delete(botHandle);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // CRAWLED DATA → INTENT (Phase 03 sẽ gọi hàm này)
+  // ═══════════════════════════════════════════════════════════════
+
+  async createIntentFromCrawledData(rawData: {
+    title: string;
+    content: string;
+    url: string;
+    province?: string;
+    district?: string;
+  }): Promise<Activity | null> {
+    // 1. Check duplicate
+    const isDup = await checkDuplicate(rawData.url);
+    if (isDup) {
+      console.log(`[Orchestrator] Skip duplicate: ${rawData.url}`);
+      return null;
+    }
+
+    // 2. Tìm Bot phù hợp (match khu vực)
+    const botHandle = await matchBotToRegion(rawData.province, rawData.district);
+    if (!botHandle) {
+      console.log(`[Orchestrator] No bot for region: ${rawData.province}/${rawData.district}`);
+      return null;
+    }
+
+    // 3. AI parse raw data → structured intent
+    let intentData: { title: string; type: string; price?: number; content: string };
+    try {
+      intentData = await chatWithJSON<{ title: string; type: string; price?: number; content: string }>(
+        'Bạn là một AI phân tích dữ liệu chuyên nghiệp. Chỉ xuất JSON hợp lệ, không có text nào khác.',
+        `Phân tích tin BĐS sau:
+Tiêu đề: ${rawData.title}
+Nội dung: ${rawData.content.slice(0, 1000)}
+
+YÊU CẦU: TRẢ LỜI NGHIÊM NGẶT BẰNG JSON HỢP LỆ. KHÔNG BỌC TRONG MARKDOWN. KHÔNG CÓ TEXT GIẢI THÍCH NÀO BÊN NGOÀI.
+Cấu trúc yêu cầu:
+{"title": "...", "type": "CAN" hoặc "CO", "price": 0, "content": "Mô tả ngắn 2-3 câu"}`,
+        { maxRetries: 2, temperature: 0.1 }
+      );
+    } catch (e: any) {
+      console.warn(`[Orchestrator] Failed to parse intent after retries:`, e.message);
+      // Fallback: dùng raw data
+      intentData = {
+        title: rawData.title.slice(0, 120),
+        type: 'CO',
+        content: rawData.content.slice(0, 500),
+      };
+    }
+
+    // 4. Save via createEnvoyPost
+    return this.createEnvoyPost(botHandle, {
+      topic: intentData.title,
+      type: (intentData.type === 'CAN' ? 'CAN' : 'CO') as 'CAN' | 'CO',
+      source_url: rawData.url,
+      province: rawData.province,
+      district: rawData.district,
+      price: intentData.price || undefined,
+    });
+  }
+
+  // ═══════════════════════════════════════════════════════════════
   // STATUS & MONITORING
   // ═══════════════════════════════════════════════════════════════
 
   getStatus(): OrchestratorStatus {
     return {
       isRunning: this.isRunning,
+      mode: this.config.dryRun ? 'test' : 'live',
+      startedAt: this.startedAt,
+      uptimeMs: this.startedAt ? Date.now() - this.startedAt : 0,
       activeBots: Array.from(this.activeBots),
       totalActivities: this.activities.size,
       activeDebates: Array.from(this.debates.values()).filter(d => d.status === 'active').length,
@@ -717,8 +934,18 @@ Viết response của bạn (2-4 câu). Có thể mention người khác (@handl
     };
   }
 
-  getRecentActivities(limit = 20): Activity[] {
-    return Array.from(this.activities.values())
+  getRecentActivities(limit = 20, filters?: { botHandle?: string; status?: string }): Activity[] {
+    let activitiesList = Array.from(this.activities.values());
+    
+    if (filters?.botHandle && filters.botHandle !== 'all') {
+      activitiesList = activitiesList.filter(a => a.botHandle === filters.botHandle);
+    }
+    
+    if (filters?.status && filters.status !== 'all') {
+      activitiesList = activitiesList.filter(a => a.status === filters.status);
+    }
+
+    return activitiesList
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, limit);
   }
@@ -734,6 +961,9 @@ Viết response của bạn (2-4 câu). Có thể mention người khác (@handl
 
 interface OrchestratorStatus {
   isRunning: boolean;
+  mode: 'test' | 'live';
+  startedAt: number | null;
+  uptimeMs: number;
   activeBots: string[];
   totalActivities: number;
   activeDebates: number;
@@ -767,6 +997,8 @@ let orchestratorInstance: BotOrchestrator | null = null;
 export function getOrchestrator(config?: Partial<OrchestratorConfig>): BotOrchestrator {
   if (!orchestratorInstance) {
     orchestratorInstance = new BotOrchestrator(config);
+    // Tự động chạy khi server bật (qua singleton access đầu tiên)
+    orchestratorInstance.start();
   }
   return orchestratorInstance;
 }

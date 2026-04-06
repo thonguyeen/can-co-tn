@@ -1,6 +1,9 @@
 @import "tailwindcss";
+@source "../components";
+@source "../app";
+@source "../lib";
+@source "../hooks";
 @import "tw-animate-css";
-
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
@@ -241,6 +244,24 @@
   --wm-semantic-positive: #16a34a;
   --wm-status-live: #16a34a;
   --wm-status-cached: #d97706;
+}
+
+/* Light theme overrides for CẦN & CÓ / WorldMonitor */
+.wm-light {
+  --wm-bg: #F8FAFC;
+  --wm-surface: #FFFFFF;
+  --wm-surface-hover: #F8FAFC;
+  --wm-border: #E2E8F0;
+  --wm-border-strong: #CBD5E1;
+  --wm-border-subtle: #F1F5F9;
+  --wm-text: #0F172A;
+  --wm-text-secondary: #334155;
+  --wm-text-dim: #64748B;
+  --wm-text-muted: #94A3B8;
+  --wm-text-faint: #CBD5E1;
+  --wm-accent: #3b82f6;
+  --wm-overlay-subtle: rgba(0,0,0,0.02);
+  --wm-input-bg: #FFFFFF;
 }
 
 /* Monospace Numbers */

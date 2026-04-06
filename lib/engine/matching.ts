@@ -1,9 +1,9 @@
 // ═══════════════════════════════════════════════════════
-// CẦN & CÓ — Matching Engine (framework-agnostic)
+// CẦN & CÓ — Matching Engine (Prisma-based)
 // Matches CẦN intents with CÓ intents + bot comments
 // ═══════════════════════════════════════════════════════
 
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { prisma } from '@/lib/db';
 import { generateEmbedding, isConfigured } from './openai';
 import type { Intent, Match } from './types';
 
@@ -50,26 +50,19 @@ export function buildIntentText(intent: Intent): string {
 /**
  * Generate and store embedding for an intent
  */
-export async function generateIntentEmbedding(
-  intent: Intent,
-  supabase: SupabaseClient,
-): Promise<void> {
+export async function generateIntentEmbedding(intent: Intent): Promise<void> {
   if (!isConfigured()) return;
 
   try {
     const text = buildIntentText(intent);
     const embedding = await generateEmbedding(text);
 
-    await supabase
-      .from('intent_embeddings')
-      .upsert(
-        {
-          intent_id: intent.id,
-          embedding: embedding as unknown as string,
-          text_input: text,
-        },
-        { onConflict: 'intent_id' },
-      );
+    // Use raw query for vector column (pgvector)
+    await prisma.$executeRaw`
+      INSERT INTO intent_embeddings (id, intent_id, embedding, text_input, created_at)
+      VALUES (gen_random_uuid(), ${intent.id}, ${embedding}::vector, ${text}, NOW())
+      ON CONFLICT (intent_id) DO UPDATE SET embedding = ${embedding}::vector, text_input = ${text}
+    `;
   } catch {
     // Non-critical
   }
@@ -157,35 +150,39 @@ function generateMatchExplanation(can: Intent, co: Intent, criteria: string[]): 
  */
 export async function findMatchesForCan(
   canIntent: Intent,
-  supabase: SupabaseClient,
   limit = 10,
 ): Promise<MatchResult[]> {
-  let query = supabase
-    .from('intents')
-    .select('*, intent_images(*)')
-    .eq('type', 'CO')
-    .eq('status', 'active')
-    .eq('category', canIntent.category)
-    .neq('user_id', canIntent.user_id)
-    .limit(limit);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const where: any = {
+    type: 'CO',
+    status: 'active',
+    category: canIntent.category,
+    userId: { not: canIntent.user_id },
+  };
 
   if (canIntent.district) {
-    query = query.eq('district', canIntent.district);
+    where.district = canIntent.district;
   }
   if (canIntent.price_min) {
-    query = query.gte('price', Math.round(canIntent.price_min * 0.8));
+    where.price = { ...(where.price || {}), gte: BigInt(Math.round(canIntent.price_min * 0.8)) };
   }
   if (canIntent.price_max) {
-    query = query.lte('price', Math.round(canIntent.price_max * 1.2));
+    where.price = { ...(where.price || {}), lte: BigInt(Math.round(canIntent.price_max * 1.2)) };
   }
 
-  const { data: coIntents } = await query.order('trust_score', { ascending: false });
+  const coIntents = await prisma.intent.findMany({
+    where,
+    include: { images: true },
+    orderBy: { trustScore: 'desc' },
+    take: limit,
+  });
 
-  if (!coIntents || coIntents.length === 0) return [];
+  if (coIntents.length === 0) return [];
 
   return coIntents
     .map((co) => {
-      const typedCo = co as unknown as Intent;
+      // Convert Prisma result to Intent type for scoring
+      const typedCo = toIntentType(co);
       const { score, criteria } = calculateMatchScore(canIntent, typedCo);
       return {
         intent: typedCo,
@@ -202,35 +199,36 @@ export async function findMatchesForCan(
  */
 export async function findMatchesForCo(
   coIntent: Intent,
-  supabase: SupabaseClient,
   limit = 10,
 ): Promise<MatchResult[]> {
-  let query = supabase
-    .from('intents')
-    .select('*, intent_images(*)')
-    .eq('type', 'CAN')
-    .eq('status', 'active')
-    .eq('category', coIntent.category)
-    .neq('user_id', coIntent.user_id)
-    .limit(limit);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const where: any = {
+    type: 'CAN',
+    status: 'active',
+    category: coIntent.category,
+    userId: { not: coIntent.user_id },
+  };
 
   if (coIntent.district) {
-    query = query.eq('district', coIntent.district);
+    where.district = coIntent.district;
   }
-  // CẦN intents: coIntent.price should fall within their price_min..price_max
-  // Supabase: price_min <= coPrice AND price_max >= coPrice (with 20% fuzzy)
   if (coIntent.price) {
-    query = query.lte('price_min', Math.round(coIntent.price * 1.2));
-    query = query.gte('price_max', Math.round(coIntent.price * 0.8));
+    where.priceMin = { lte: BigInt(Math.round(Number(coIntent.price) * 1.2)) };
+    where.priceMax = { gte: BigInt(Math.round(Number(coIntent.price) * 0.8)) };
   }
 
-  const { data: canIntents } = await query.order('trust_score', { ascending: false });
+  const canIntents = await prisma.intent.findMany({
+    where,
+    include: { images: true },
+    orderBy: { trustScore: 'desc' },
+    take: limit,
+  });
 
-  if (!canIntents || canIntents.length === 0) return [];
+  if (canIntents.length === 0) return [];
 
   return canIntents
     .map((can) => {
-      const typedCan = can as unknown as Intent;
+      const typedCan = toIntentType(can);
       const { score, criteria } = calculateMatchScore(coIntent, typedCan);
       return {
         intent: typedCan,
@@ -251,25 +249,26 @@ export async function saveMatches(
   coIntentId: string,
   similarity: number,
   explanation: string,
-  supabase: SupabaseClient,
 ): Promise<Match | null> {
-  const { data, error } = await supabase
-    .from('matches')
-    .upsert(
-      {
-        can_intent_id: canIntentId,
-        co_intent_id: coIntentId,
+  try {
+    const data = await prisma.match.upsert({
+      where: {
+        canIntentId_coIntentId: { canIntentId, coIntentId },
+      },
+      update: { similarity, explanation, status: 'suggested' },
+      create: {
+        canIntentId,
+        coIntentId,
         similarity,
         explanation,
         status: 'suggested',
       },
-      { onConflict: 'can_intent_id,co_intent_id' },
-    )
-    .select()
-    .single();
+    });
 
-  if (error) return null;
-  return data as Match;
+    return data as unknown as Match;
+  } catch {
+    return null;
+  }
 }
 
 // ═══════════════════════════════════════════════════════
@@ -283,34 +282,35 @@ export async function createMatchBotComment(
   intentId: string,
   intentType: 'CAN' | 'CO',
   matches: MatchResult[],
-  supabase: SupabaseClient,
 ): Promise<void> {
   // Anti-spam: check if bot already commented
-  const { data: existing } = await supabase
-    .from('intent_comments')
-    .select('id')
-    .eq('intent_id', intentId)
-    .eq('is_bot', true)
-    .eq('bot_name', 'match_advisor')
-    .limit(1);
-
-  if (existing && existing.length > 0) {
-    // Update existing comment instead of creating new
-    const content = buildBotCommentContent(intentType, matches);
-    await supabase
-      .from('intent_comments')
-      .update({ content })
-      .eq('id', existing[0].id);
-    return;
-  }
+  const existing = await prisma.intentComment.findFirst({
+    where: {
+      intentId,
+      isBot: true,
+      botName: 'match_advisor',
+    },
+    select: { id: true },
+  });
 
   const content = buildBotCommentContent(intentType, matches);
 
-  await supabase.from('intent_comments').insert({
-    intent_id: intentId,
-    is_bot: true,
-    bot_name: 'match_advisor',
-    content,
+  if (existing) {
+    // Update existing comment instead of creating new
+    await prisma.intentComment.update({
+      where: { id: existing.id },
+      data: { content },
+    });
+    return;
+  }
+
+  await prisma.intentComment.create({
+    data: {
+      intentId,
+      isBot: true,
+      botName: 'match_advisor',
+      content,
+    },
   });
 }
 
@@ -343,30 +343,75 @@ function buildBotCommentContent(intentType: 'CAN' | 'CO', matches: MatchResult[]
 export async function notifyMatchedIntents(
   sourceIntentType: 'CAN' | 'CO',
   matches: MatchResult[],
-  supabase: SupabaseClient,
 ): Promise<void> {
   for (const match of matches.slice(0, 3)) {
     // Check if bot already commented on the other intent
-    const { data: existing } = await supabase
-      .from('intent_comments')
-      .select('id')
-      .eq('intent_id', match.intent.id)
-      .eq('is_bot', true)
-      .eq('bot_name', 'match_advisor')
-      .limit(1);
+    const existing = await prisma.intentComment.findFirst({
+      where: {
+        intentId: match.intent.id,
+        isBot: true,
+        botName: 'match_advisor',
+      },
+      select: { id: true },
+    });
 
-    if (existing && existing.length > 0) continue; // Anti-spam
+    if (existing) continue; // Anti-spam
 
     const pct = Math.round(match.similarity * 100);
     const content = sourceIntentType === 'CAN'
       ? `Có người đang tìm mua phù hợp với tin của bạn. Độ phù hợp: ${pct}%`
       : `Có tin mới phù hợp nhu cầu của bạn. Độ phù hợp: ${pct}%`;
 
-    await supabase.from('intent_comments').insert({
-      intent_id: match.intent.id,
-      is_bot: true,
-      bot_name: 'match_advisor',
-      content,
+    await prisma.intentComment.create({
+      data: {
+        intentId: match.intent.id,
+        isBot: true,
+        botName: 'match_advisor',
+        content,
+      },
     });
   }
+}
+
+// ═══════════════════════════════════════════════════════
+// Helpers
+// ═══════════════════════════════════════════════════════
+
+/**
+ * Convert Prisma intent result to Intent type (snake_case fields for scoring compat)
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function toIntentType(prismaIntent: any): Intent {
+  return {
+    id: prismaIntent.id,
+    user_id: prismaIntent.userId,
+    type: prismaIntent.type,
+    raw_text: prismaIntent.rawText,
+    title: prismaIntent.title,
+    parsed_data: prismaIntent.parsedData || {},
+    category: prismaIntent.category,
+    subcategory: prismaIntent.subcategory,
+    price: prismaIntent.price ? Number(prismaIntent.price) : null,
+    price_min: prismaIntent.priceMin ? Number(prismaIntent.priceMin) : null,
+    price_max: prismaIntent.priceMax ? Number(prismaIntent.priceMax) : null,
+    address: prismaIntent.address,
+    district: prismaIntent.district,
+    ward: prismaIntent.ward,
+    city: prismaIntent.city,
+    lat: prismaIntent.lat ? Number(prismaIntent.lat) : null,
+    lng: prismaIntent.lng ? Number(prismaIntent.lng) : null,
+    trust_score: prismaIntent.trustScore,
+    verification_level: prismaIntent.verificationLevel,
+    comment_count: prismaIntent.commentCount,
+    match_count: prismaIntent.matchCount,
+    view_count: prismaIntent.viewCount,
+    status: prismaIntent.status,
+    expires_at: prismaIntent.expiresAt?.toISOString() || null,
+    is_bot: prismaIntent.isBot,
+    bot_handle: prismaIntent.botHandle,
+    source_url: prismaIntent.sourceUrl,
+    created_at: prismaIntent.createdAt?.toISOString(),
+    updated_at: prismaIntent.updatedAt?.toISOString(),
+    images: prismaIntent.images || [],
+  };
 }

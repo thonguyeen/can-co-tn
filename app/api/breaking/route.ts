@@ -1,38 +1,46 @@
 import { NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
-
-function getSupabaseAdmin() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
-}
+import { prisma } from '@/lib/db'
+import { toSnakeCase } from '@/lib/data/helpers'
 
 // GET: Fetch active breaking news
 export async function GET() {
   try {
-    const supabase = getSupabaseAdmin()
-
-    const { data, error } = await supabase
-      .from('breaking_news')
-      .select('*, posts (content, bot_id, bots (name, handle, color_accent))')
-      .eq('is_active', true)
-      .gt('expires_at', new Date().toISOString())
-      .order('created_at', { ascending: false })
-      .limit(5)
-
-    if (error) throw error
+    const data = await prisma.breakingNews.findMany({
+      where: {
+        isActive: true,
+        expiresAt: { gt: new Date() },
+      },
+      include: {
+        post: {
+          select: {
+            content: true,
+            botId: true,
+            bot: {
+              select: {
+                name: true,
+                handle: true,
+                colorAccent: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+    })
 
     // Deactivate expired ones
-    await supabase
-      .from('breaking_news')
-      .update({ is_active: false })
-      .lt('expires_at', new Date().toISOString())
-      .eq('is_active', true)
+    await prisma.breakingNews.updateMany({
+      where: {
+        expiresAt: { lt: new Date() },
+        isActive: true,
+      },
+      data: { isActive: false },
+    })
 
     return NextResponse.json({
       success: true,
-      breaking: data || [],
+      breaking: toSnakeCase(data) || [],
     })
   } catch (error) {
     console.error('Breaking news fetch error:', error)
@@ -56,32 +64,25 @@ export async function POST(req: Request) {
       )
     }
 
-    const supabase = getSupabaseAdmin()
-
     const expiresAt = new Date(
       Date.now() + (expiresInMinutes || 120) * 60 * 1000
-    ).toISOString()
+    )
 
-    const { data, error } = await supabase
-      .from('breaking_news')
-      .insert({
-        post_id: postId,
+    const data = await prisma.breakingNews.create({
+      data: {
+        postId,
         headline,
         summary: summary || '',
-        urgency_level: urgencyLevel || 'medium',
+        urgencyLevel: urgencyLevel || 'medium',
         category: category || 'general',
-        related_topics: relatedTopics || [],
-        is_active: true,
-        expires_at: expiresAt,
-      })
-      .select()
-      .single()
-
-    if (error) throw error
+        isActive: true,
+        expiresAt,
+      },
+    })
 
     return NextResponse.json({
       success: true,
-      breaking: data,
+      breaking: toSnakeCase(data),
     })
   } catch (error) {
     console.error('Breaking news create error:', error)

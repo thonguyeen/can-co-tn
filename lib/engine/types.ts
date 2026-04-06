@@ -36,6 +36,9 @@ export interface Intent {
   expires_at: string | null;
   created_at: string;
   updated_at: string;
+  is_bot?: boolean | null;
+  bot_handle?: string | null;
+  source_url?: string | null;
   images?: IntentImage[];
 }
 

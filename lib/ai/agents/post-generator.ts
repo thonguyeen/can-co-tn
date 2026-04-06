@@ -1,14 +1,7 @@
 import { chat } from '../client'
 import { BOT_PERSONAS } from '../prompts/bot-personas'
 import { assignBotToNews } from './bot-assigner'
-import { createClient } from '@supabase/supabase-js'
-
-function getSupabaseAdmin() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
-}
+import { prisma } from '@/lib/db'
 
 interface RawNewsWithDetails {
   id: string
@@ -49,21 +42,18 @@ export async function generatePostFromNews(
   verificationData?: VerificationData
 ): Promise<{ success: boolean; post?: GeneratedPost; error?: string }> {
   try {
-    const supabase = getSupabaseAdmin()
-
     // 1. Fetch raw news
-    const { data: rawNews, error } = await supabase
-      .from('raw_news')
-      .select(
-        `
-        *,
-        sources (name, credibility_score, category)
-      `
-      )
-      .eq('id', rawNewsId)
-      .single()
+    // Note: Due to lack of strict schema, using queryRaw for joining sources
+    const rawNewsData = await prisma.$queryRaw<any[]>`
+      SELECT r.*, row_to_json(s.*) as sources
+      FROM raw_news r
+      LEFT JOIN crawl_sources s ON r.source_id = s.id
+      WHERE r.id = ${rawNewsId}::uuid
+      LIMIT 1
+    `
+    const rawNews = rawNewsData[0]
 
-    if (error || !rawNews) {
+    if (!rawNews) {
       throw new Error(`Raw news not found: ${rawNewsId}`)
     }
 
@@ -93,8 +83,8 @@ export async function generatePostFromNews(
       sources: [
         {
           url: rawNews.original_url,
-          title: rawNews.sources.name,
-          credibility: rawNews.sources.credibility_score,
+          title: rawNews.sources?.name || 'Unknown',
+          credibility: rawNews.sources?.credibility_score || 50,
         },
       ],
       rawNewsIds: [rawNewsId],
@@ -131,7 +121,7 @@ TIÊU ĐỀ: ${news.original_title}
 NỘI DUNG:
 ${news.original_content || 'Không có nội dung chi tiết, chỉ viết dựa trên tiêu đề.'}
 
-NGUỒN: ${news.sources.name}
+NGUỒN: ${news.sources?.name || 'Unknown'}
 NGÀY: ${news.original_published_at || 'Không rõ'}
 
 ${
@@ -202,35 +192,29 @@ export async function saveGeneratedPost(post: GeneratedPost): Promise<{
   error?: string
 }> {
   try {
-    const supabase = getSupabaseAdmin()
+    const data = await prisma.$queryRaw<any[]>`
+      INSERT INTO posts (bot_id, content, verification_status, verification_note, sources, raw_news_ids)
+      VALUES (${post.botId}, ${post.content}, ${post.verificationStatus}, ${post.verificationNote}, ${JSON.stringify(post.sources)}::jsonb, ${post.rawNewsIds})
+      RETURNING id
+    `
+    const postId = data[0]?.id
 
-    const { data, error } = await supabase
-      .from('posts')
-      .insert({
-        bot_id: post.botId,
-        content: post.content,
-        verification_status: post.verificationStatus,
-        verification_note: post.verificationNote,
-        sources: post.sources,
-        raw_news_ids: post.rawNewsIds,
-      })
-      .select('id')
-      .single()
-
-    if (error) throw error
+    if (!postId) throw new Error('Failed to insert post')
 
     // Update bot post count
-    await supabase.rpc('increment_bot_posts', { p_bot_id: post.botId })
+    await prisma.$executeRaw`
+      UPDATE bots SET total_posts = COALESCE(total_posts, 0) + 1 WHERE id = ${post.botId}
+    `
 
     // Mark raw news as processed
-    for (const rawNewsId of post.rawNewsIds) {
-      await supabase
-        .from('raw_news')
-        .update({ is_processed: true, processed_at: new Date().toISOString() })
-        .eq('id', rawNewsId)
+    if (post.rawNewsIds && post.rawNewsIds.length > 0) {
+      const idsParam = post.rawNewsIds.map(id => `'${id}'`).join(',')
+      await prisma.$executeRawUnsafe(`
+        UPDATE raw_news SET is_processed = true, processed_at = NOW() WHERE id IN (${idsParam})
+      `)
     }
 
-    return { success: true, postId: data.id }
+    return { success: true, postId }
   } catch (error) {
     console.error('Save post error:', error)
     return {
@@ -248,22 +232,15 @@ export async function generatePendingPosts(limit: number = 5): Promise<{
   generated: number
   results: { rawNewsId: string; postId?: string; error?: string }[]
 }> {
-  const supabase = getSupabaseAdmin()
-
   // Get unprocessed news
-  const { data: unprocessedNews } = await supabase
-    .from('raw_news')
-    .select(
-      `
-      id,
-      original_title,
-      original_content,
-      sources (name, credibility_score, category)
-    `
-    )
-    .eq('is_processed', false)
-    .order('created_at', { ascending: true })
-    .limit(limit)
+  const unprocessedNews = await prisma.$queryRaw<any[]>`
+    SELECT r.id, r.original_title, r.original_content, row_to_json(s.*) as sources
+    FROM raw_news r
+    LEFT JOIN crawl_sources s ON r.source_id = s.id
+    WHERE r.is_processed = false
+    ORDER BY r.created_at ASC
+    LIMIT ${limit}
+  `
 
   const toProcess = unprocessedNews || []
   const results: { rawNewsId: string; postId?: string; error?: string }[] = []

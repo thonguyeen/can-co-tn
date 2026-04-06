@@ -2,6 +2,8 @@
 // POINT SYSTEM
 // ═══════════════════════════════════════════════════════════════
 
+import { prisma } from '@/lib/db'
+
 export type PointAction =
   | 'like_post'
   | 'comment'
@@ -109,74 +111,51 @@ export async function awardPoints(
 
   const transaction: PointTransaction = { userId, action, points, metadata }
 
-  const { createClient } = await import('@supabase/supabase-js')
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
+  // Record transaction in raw SQL since it's not mapped in Prisma schema
+  await prisma.$executeRaw`
+    INSERT INTO point_transactions (user_id, action, points, metadata)
+    VALUES (${userId}, ${action}, ${points}, ${metadata ? JSON.stringify(metadata) : '{}'}::jsonb)
+  `
 
-  await supabase.from('point_transactions').insert({
-    user_id: userId,
-    action,
-    points,
-    metadata,
+  const userStat = await prisma.userStat.findUnique({
+    where: { userId },
+    select: { points: true }
   })
 
-  const { data: user } = await supabase
-    .from('user_stats')
-    .select('total_points')
-    .eq('user_id', userId)
-    .single()
-
-  const currentPoints = user?.total_points || 0
+  const currentPoints = userStat?.points || 0
   const newTotal = currentPoints + points
 
-  await supabase
-    .from('user_stats')
-    .upsert({
-      user_id: userId,
-      total_points: newTotal,
-      updated_at: new Date().toISOString(),
-    }, { onConflict: 'user_id' })
+  await prisma.userStat.upsert({
+    where: { userId },
+    update: { points: newTotal, updatedAt: new Date() },
+    create: { userId, points: newTotal, updatedAt: new Date() }
+  })
 
   // Check for level up
-  await checkLevelUp(supabase, userId, newTotal)
+  await checkLevelUp(userId, newTotal)
 
   return { newTotal, transaction }
 }
 
 export async function getUserPoints(userId: string): Promise<number> {
-  const { createClient } = await import('@supabase/supabase-js')
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
+  const userStat = await prisma.userStat.findUnique({
+    where: { userId },
+    select: { points: true }
+  })
 
-  const { data } = await supabase
-    .from('user_stats')
-    .select('total_points')
-    .eq('user_id', userId)
-    .single()
-
-  return data?.total_points || 0
+  return userStat?.points || 0
 }
 
 export async function getPointHistory(
   userId: string,
   limit: number = 20
 ): Promise<PointTransaction[]> {
-  const { createClient } = await import('@supabase/supabase-js')
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
-
-  const { data } = await supabase
-    .from('point_transactions')
-    .select('*')
-    .eq('user_id', userId)
-    .order('created_at', { ascending: false })
-    .limit(limit)
+  const data = await prisma.$queryRaw<any[]>`
+    SELECT user_id, action, points, metadata FROM point_transactions
+    WHERE user_id = ${userId}
+    ORDER BY created_at DESC
+    LIMIT ${limit}
+  `
 
   return (data || []).map(d => ({
     userId: d.user_id,
@@ -186,37 +165,30 @@ export async function getPointHistory(
   }))
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function checkLevelUp(supabase: any, userId: string, newTotal: number): Promise<void> {
-  const { data: user } = await supabase
-    .from('user_stats')
-    .select('current_level')
-    .eq('user_id', userId)
-    .single()
+async function checkLevelUp(userId: string, newTotal: number): Promise<void> {
+  const user = await prisma.userStat.findUnique({
+    where: { userId },
+    select: { level: true }
+  })
 
-  const currentLevel = user?.current_level || 1
+  const currentLevel = user?.level || 1
   const newLevel = getLevelForPoints(newTotal)
 
   if (newLevel.level > currentLevel) {
-    await supabase
-      .from('user_stats')
-      .update({ current_level: newLevel.level })
-      .eq('user_id', userId)
-
-    await supabase.from('point_transactions').insert({
-      user_id: userId,
-      action: 'level_up',
-      points: POINT_VALUES.level_up,
-      metadata: { new_level: newLevel.level, level_name: newLevel.name },
+    await prisma.userStat.update({
+      where: { userId },
+      data: { level: newLevel.level }
     })
 
-    await supabase.from('notifications').insert({
-      user_id: userId,
-      type: 'level_up',
-      title: 'Level Up!',
-      message: `Ban da dat ${newLevel.icon} ${newLevel.name} (Level ${newLevel.level})!`,
-      data: { level: newLevel },
-    })
+    await prisma.$executeRaw`
+      INSERT INTO point_transactions (user_id, action, points, metadata)
+      VALUES (${userId}, 'level_up', ${POINT_VALUES.level_up}, ${JSON.stringify({ new_level: newLevel.level, level_name: newLevel.name })}::jsonb)
+    `
+
+    await prisma.$executeRaw`
+      INSERT INTO notifications (user_id, type, title, message, data)
+      VALUES (${userId}, 'level_up', 'Level Up!', ${`Ban da dat ${newLevel.icon} ${newLevel.name} (Level ${newLevel.level})!`}, ${JSON.stringify({ level: newLevel })}::jsonb)
+    `
 
     // Lazy import to avoid circular dependency
     const { checkAchievement } = await import('./achievements')

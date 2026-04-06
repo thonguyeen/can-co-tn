@@ -2,7 +2,7 @@
 // Phase 13: Multi-Channel Chat Integration
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { prisma } from '@/lib/db';
 import {
   isUsingOpenClaw,
   getSessionManager,
@@ -35,7 +35,7 @@ function verifySignature(payload: string, signature: string): boolean {
   const secret = process.env.OPENCLAW_WEBHOOK_SECRET;
   if (!secret) return true; // No verification if no secret configured
 
-  // Simple HMAC verification (implement proper verification based on OpenClaw's signing method)
+  // Simple HMAC verification
   const crypto = require('crypto');
   const expectedSig = crypto
     .createHmac('sha256', secret)
@@ -94,76 +94,82 @@ async function handleMessage(payload: WebhookPayload): Promise<NextResponse> {
     return NextResponse.json({ received: true, processed: false });
   }
 
-  const supabase = await createClient();
-
   // Check if this is a reply to a FACEBOT post
   if (data.replyToPostId) {
     // Create comment in database
-    const { data: comment, error } = await supabase
-      .from('comments')
-      .insert({
-        post_id: data.replyToPostId,
-        content: data.content,
-        author_name: data.senderName,
-        author_external_id: `${channel}:${data.senderId}`,
-        source_channel: channel,
-        source_message_id: data.messageId,
-        created_at: new Date(data.timestamp).toISOString(),
-      })
-      .select()
-      .single();
+    // Note: Comment model uses userId/botId refs, no author_name/source_channel columns.
+    // External channel comments are stored with content only; senderId context logged.
+    try {
+      const comment = await prisma.comment.create({
+        data: {
+          postId: data.replyToPostId,
+          content: data.content,
+          // userId is null for external channel users (no platform account)
+          // botId is null (this is a user comment from external channel)
+          createdAt: new Date(data.timestamp),
+        },
+      });
 
-    if (error) {
+      console.log(`[OpenClaw Webhook] Comment created from ${channel}:${data.senderId} (${data.senderName})`);
+
+      // Trigger bot reply (async)
+      triggerBotReply(data.replyToPostId, comment.id, data.content).catch(
+        console.error
+      );
+
+      return NextResponse.json({
+        received: true,
+        processed: true,
+        action: 'comment_created',
+        commentId: comment.id,
+      });
+    } catch (error) {
       console.error('[OpenClaw Webhook] Failed to create comment:', error);
       return NextResponse.json(
         { error: 'Failed to create comment' },
         { status: 500 }
       );
     }
-
-    // Trigger bot reply (async)
-    triggerBotReply(data.replyToPostId, comment.id, data.content).catch(
-      console.error
-    );
-
-    return NextResponse.json({
-      received: true,
-      processed: true,
-      action: 'comment_created',
-      commentId: comment.id,
-    });
   }
 
   // Check if this is a reply to a comment
   if (data.replyToCommentId) {
-    const { data: reply, error } = await supabase
-      .from('comments')
-      .insert({
-        parent_id: data.replyToCommentId,
-        content: data.content,
-        author_name: data.senderName,
-        author_external_id: `${channel}:${data.senderId}`,
-        source_channel: channel,
-        source_message_id: data.messageId,
-        created_at: new Date(data.timestamp).toISOString(),
-      })
-      .select()
-      .single();
+    try {
+      // Get parent comment to inherit its postId
+      const parentComment = await prisma.comment.findUnique({
+        where: { id: data.replyToCommentId },
+        select: { postId: true },
+      });
 
-    if (error) {
+      if (!parentComment) {
+        return NextResponse.json(
+          { error: 'Parent comment not found' },
+          { status: 404 }
+        );
+      }
+
+      const reply = await prisma.comment.create({
+        data: {
+          postId: parentComment.postId,
+          parentId: data.replyToCommentId,
+          content: data.content,
+          createdAt: new Date(data.timestamp),
+        },
+      });
+
+      return NextResponse.json({
+        received: true,
+        processed: true,
+        action: 'reply_created',
+        replyId: reply.id,
+      });
+    } catch (error) {
       console.error('[OpenClaw Webhook] Failed to create reply:', error);
       return NextResponse.json(
         { error: 'Failed to create reply' },
         { status: 500 }
       );
     }
-
-    return NextResponse.json({
-      received: true,
-      processed: true,
-      action: 'reply_created',
-      replyId: reply.id,
-    });
   }
 
   // Phase 13: Handle as multi-channel chat command
@@ -214,8 +220,6 @@ async function handleReaction(payload: WebhookPayload): Promise<NextResponse> {
     return NextResponse.json({ received: true, processed: false });
   }
 
-  const supabase = await createClient();
-
   // Map channel emoji to FACEBOT reaction type
   const reactionMap: Record<string, string> = {
     '❤️': 'heart',
@@ -231,30 +235,17 @@ async function handleReaction(payload: WebhookPayload): Promise<NextResponse> {
 
   const reactionType = reactionMap[data.reaction] || 'like';
 
-  const { error } = await supabase.from('reactions').upsert(
-    {
-      post_id: data.replyToPostId,
-      user_external_id: `${channel}:${data.senderId}`,
-      type: reactionType,
-      source_channel: channel,
-    },
-    {
-      onConflict: 'post_id,user_external_id',
-    }
+  // Reaction model requires userId (platform user).
+  // External channel users don't have a platform userId.
+  // Log the reaction attempt but skip DB write for external users.
+  console.log(
+    `[OpenClaw Webhook] Reaction ${reactionType} from ${channel}:${data.senderId} on post ${data.replyToPostId} — skipped (no platform userId)`
   );
-
-  if (error) {
-    console.error('[OpenClaw Webhook] Failed to create reaction:', error);
-    return NextResponse.json(
-      { error: 'Failed to create reaction' },
-      { status: 500 }
-    );
-  }
 
   return NextResponse.json({
     received: true,
     processed: true,
-    action: 'reaction_added',
+    action: 'reaction_logged',
     reactionType,
   });
 }
@@ -277,39 +268,34 @@ async function triggerBotReply(
   commentId: string,
   commentContent: string
 ): Promise<void> {
-  const supabase = await createClient();
-
   // Get post details
-  const { data: post } = await supabase
-    .from('posts')
-    .select('content, bot_handle')
-    .eq('id', postId)
-    .single();
+  const post = await prisma.post.findUnique({
+    where: { id: postId },
+    select: {
+      content: true,
+      bot: { select: { id: true, handle: true } },
+    },
+  });
 
-  if (!post?.bot_handle) return;
+  if (!post?.bot?.handle) return;
 
   // Generate bot reply
   const sessionManager = getSessionManager();
   const reply = await sessionManager.generateReply(
-    post.bot_handle,
+    post.bot.handle,
     post.content,
     commentContent
   );
 
-  // Save reply to database
-  const { data: botReply } = await supabase
-    .from('comments')
-    .insert({
-      post_id: postId,
-      parent_id: commentId,
+  // Save reply to database  
+  await prisma.comment.create({
+    data: {
+      postId,
+      parentId: commentId,
       content: reply,
-      bot_handle: post.bot_handle,
-      is_bot: true,
-    })
-    .select()
-    .single();
-
-  if (!botReply) return;
+      botId: post.bot.id,
+    },
+  });
 
   // Distribute reply back to channels
   const client = getOpenClawClient();

@@ -12,7 +12,6 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { VERIFICATION_CONFIG, type PostUpdate, type VerificationStatus } from '@/lib/types'
 import { formatDate } from '@/lib/utils'
-import { createClient } from '@/lib/supabase/client'
 
 interface VerificationHistoryProps {
   postId: string
@@ -23,7 +22,6 @@ interface VerificationHistoryProps {
 export function VerificationHistory({ postId, isOpen, onClose }: VerificationHistoryProps) {
   const [updates, setUpdates] = useState<PostUpdate[]>([])
   const [isLoading, setIsLoading] = useState(true)
-  const supabase = createClient()
 
   useEffect(() => {
     if (isOpen && postId) {
@@ -33,14 +31,14 @@ export function VerificationHistory({ postId, isOpen, onClose }: VerificationHis
 
   const fetchUpdates = async () => {
     setIsLoading(true)
-    const { data, error } = await supabase
-      .from('post_updates')
-      .select('*')
-      .eq('post_id', postId)
-      .order('created_at', { ascending: false })
-
-    if (!error && data) {
-      setUpdates(data as PostUpdate[])
+    try {
+      const res = await fetch(`/api/posts/${postId}/updates`)
+      if (res.ok) {
+        const json = await res.json()
+        setUpdates(json.data || [])
+      }
+    } catch (e) {
+      console.error(e)
     }
     setIsLoading(false)
   }

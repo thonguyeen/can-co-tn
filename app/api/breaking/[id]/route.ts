@@ -1,12 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
-
-function getSupabaseAdmin() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
-}
+import { prisma } from '@/lib/db'
+import { toSnakeCase } from '@/lib/data/helpers'
 
 // GET: Fetch single breaking news by ID
 export async function GET(
@@ -15,19 +9,36 @@ export async function GET(
 ) {
   try {
     const { id } = await params
-    const supabase = getSupabaseAdmin()
 
-    const { data, error } = await supabase
-      .from('breaking_news')
-      .select('*, posts (content, bot_id, bots (name, handle, color_accent))')
-      .eq('id', id)
-      .single()
+    const data = await prisma.breakingNews.findUnique({
+      where: { id },
+      include: {
+        post: {
+          select: {
+            content: true,
+            botId: true,
+            bot: {
+              select: {
+                name: true,
+                handle: true,
+                colorAccent: true,
+              },
+            },
+          },
+        },
+      },
+    })
 
-    if (error) throw error
+    if (!data) {
+      return NextResponse.json(
+        { error: 'Not found' },
+        { status: 404 }
+      )
+    }
 
     return NextResponse.json({
       success: true,
-      breaking: data,
+      breaking: toSnakeCase(data),
     })
   } catch (error) {
     console.error('Breaking news fetch error:', error)
@@ -48,26 +59,24 @@ export async function PATCH(
     const body = await req.json()
     const { is_active, extends_minutes } = body
 
-    const supabase = getSupabaseAdmin()
-
-    const updates: Record<string, unknown> = {}
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const updates: any = {}
 
     if (typeof is_active === 'boolean') {
-      updates.is_active = is_active
+      updates.isActive = is_active
     }
 
     if (extends_minutes) {
       // Extend expiry time
-      const { data: current } = await supabase
-        .from('breaking_news')
-        .select('expires_at')
-        .eq('id', id)
-        .single()
+      const current = await prisma.breakingNews.findUnique({
+        where: { id },
+        select: { expiresAt: true },
+      })
 
-      if (current) {
-        const currentExpiry = new Date(current.expires_at).getTime()
+      if (current?.expiresAt) {
+        const currentExpiry = new Date(current.expiresAt).getTime()
         const newExpiry = Math.max(currentExpiry, Date.now()) + extends_minutes * 60 * 1000
-        updates.expires_at = new Date(newExpiry).toISOString()
+        updates.expiresAt = new Date(newExpiry)
       }
     }
 
@@ -78,18 +87,14 @@ export async function PATCH(
       )
     }
 
-    const { data, error } = await supabase
-      .from('breaking_news')
-      .update(updates)
-      .eq('id', id)
-      .select()
-      .single()
-
-    if (error) throw error
+    const data = await prisma.breakingNews.update({
+      where: { id },
+      data: updates,
+    })
 
     return NextResponse.json({
       success: true,
-      breaking: data,
+      breaking: toSnakeCase(data),
     })
   } catch (error) {
     console.error('Breaking news update error:', error)
@@ -107,14 +112,10 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params
-    const supabase = getSupabaseAdmin()
 
-    const { error } = await supabase
-      .from('breaking_news')
-      .delete()
-      .eq('id', id)
-
-    if (error) throw error
+    await prisma.breakingNews.delete({
+      where: { id },
+    })
 
     return NextResponse.json({ success: true })
   } catch (error) {

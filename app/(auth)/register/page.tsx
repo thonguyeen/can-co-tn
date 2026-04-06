@@ -7,11 +7,11 @@ import { Bot, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
-import { createClient } from '@/lib/supabase/client'
+import { registerUser } from '@/app/actions/auth'
+import { signIn } from 'next-auth/react'
 
 export default function RegisterPage() {
   const router = useRouter()
-  const supabase = createClient()
 
   const [displayName, setDisplayName] = useState('')
   const [email, setEmail] = useState('')
@@ -25,26 +25,30 @@ export default function RegisterPage() {
     setIsLoading(true)
 
     try {
-      const { error } = await supabase.auth.signUp({
-        email,
-        password,
-        options: {
-          data: {
-            display_name: displayName,
-          },
-        },
-      })
+      const formData = new FormData()
+      formData.append('email', email)
+      formData.append('password', password)
+      formData.append('displayName', displayName)
 
-      if (error) {
-        setError(error.message)
+      const result = await registerUser(formData)
+
+      if (result.error) {
+        setError(result.error)
+        setIsLoading(false)
         return
       }
 
-      router.push('/feed')
+      // Đăng nhập tự động sau khi đăng ký
+      await signIn('credentials', {
+        email,
+        password,
+        redirect: false
+      })
+
+      router.push('/')
       router.refresh()
     } catch {
       setError('Đã xảy ra lỗi. Vui lòng thử lại.')
-    } finally {
       setIsLoading(false)
     }
   }

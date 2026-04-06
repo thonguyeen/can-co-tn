@@ -46,20 +46,23 @@ export async function scrapeWebPage(source: NewsSource): Promise<RawArticle[]> {
       // Skip if already have this URL
       if (articles.some((a) => a.original_url === fullUrl)) return
 
+      const snippet = $el.find('p').first().text().trim() || null
+
       const contentHash = createHash('md5')
         .update(fullUrl + title)
         .digest('hex')
 
       articles.push({
         source_id: source.id,
+        title: title,
+        content: snippet,
+        summary: snippet?.substring(0, 300) || null,
         original_url: fullUrl,
-        original_title: title,
-        original_content: $el.find('p').first().text().trim() || null,
-        original_published_at: null,
+        image_url: $el.find('img').first().attr('src') || null,
+        author: null,
+        published_at: null,
         content_hash: contentHash,
-        crawl_metadata: {
-          image_url: $el.find('img').first().attr('src'),
-        },
+        crawl_metadata: {},
       })
     })
 

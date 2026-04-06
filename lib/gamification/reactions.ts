@@ -2,6 +2,7 @@
 // EXPANDED REACTION SYSTEM
 // ═══════════════════════════════════════════════════════════════
 
+import { prisma } from '@/lib/db'
 import { awardPoints } from './points'
 
 export type ReactionType =
@@ -42,45 +43,55 @@ export async function addReaction(
   targetId: string,
   reactionType: ReactionType
 ): Promise<{ action: 'added' | 'changed' | 'removed' }> {
-  const { createClient } = await import('@supabase/supabase-js')
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
+  // Prisma migration note: Prisma schema only supports Reaction to Post (postId). 
+  // If targetType is comment, it will fail unless mapped properly via raw sql or schema update.
+  // Using $queryRaw directly helps maintain parity where Prisma model is mismatched.
+  const existingRecords = await prisma.$queryRaw<any[]>`
+    SELECT id, type, reaction_type FROM reactions 
+    WHERE user_id = ${userId} 
+      AND (
+        (post_id = ${targetId} AND ${targetType} = 'post')
+        OR
+        (target_id = ${targetId} AND target_type = ${targetType})
+      )
+    LIMIT 1
+  `
 
-  const { data: existing } = await supabase
-    .from('reactions')
-    .select('id, reaction_type')
-    .eq('user_id', userId)
-    .eq('target_type', targetType)
-    .eq('target_id', targetId)
-    .single()
+  const existing = existingRecords[0]
 
   if (existing) {
-    if (existing.reaction_type === reactionType) {
-      await supabase.from('reactions').delete().eq('id', existing.id)
+    const currentReactionType = existing.reaction_type || existing.type
+    if (currentReactionType === reactionType) {
+      await prisma.$executeRaw`DELETE FROM reactions WHERE id = ${existing.id}`
       return { action: 'removed' }
     } else {
-      await supabase
-        .from('reactions')
-        .update({ reaction_type: reactionType })
-        .eq('id', existing.id)
+      await prisma.$executeRaw`UPDATE reactions SET type = ${reactionType}, reaction_type = ${reactionType} WHERE id = ${existing.id}`
       return { action: 'changed' }
     }
   }
 
-  await supabase.from('reactions').insert({
-    user_id: userId,
-    target_type: targetType,
-    target_id: targetId,
-    reaction_type: reactionType,
-  })
+  // Insert new reaction
+  if (targetType === 'post') {
+    await prisma.reaction.create({
+      data: {
+        userId,
+        postId: targetId,
+        type: reactionType,
+      }
+    })
+  } else {
+    // raw insert for unsupported schemas 
+    await prisma.$executeRaw`
+      INSERT INTO reactions (user_id, target_type, target_id, reaction_type)
+      VALUES (${userId}, ${targetType}, ${targetId}, ${reactionType})
+    `
+  }
 
   // Award points to reactor
   await awardPoints(userId, 'like_post', { reaction_type: reactionType })
 
   // Award points to content creator
-  const creatorId = await getContentCreatorId(supabase, targetType, targetId)
+  const creatorId = await getContentCreatorId(targetType, targetId)
   if (creatorId && creatorId !== userId) {
     await awardPoints(creatorId, 'receive_like', {
       reaction_type: reactionType,
@@ -92,38 +103,37 @@ export async function addReaction(
   return { action: 'added' }
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function getContentCreatorId(
-  supabase: any,
   targetType: 'post' | 'comment',
   targetId: string
 ): Promise<string | null> {
   const table = targetType === 'post' ? 'posts' : 'comments'
 
-  const { data } = await supabase
-    .from(table)
-    .select('user_id')
-    .eq('id', targetId)
-    .single()
-
-  return data?.user_id || null
+  if (table === 'posts') {
+    const post = await prisma.post.findUnique({ where: { id: targetId }, select: { botId: true } })
+    return post?.botId || null
+  } else {
+    const comment = await prisma.comment.findUnique({ where: { id: targetId }, select: { userId: true, botId: true } })
+    return comment?.userId || comment?.botId || null
+  }
 }
 
 export async function getReactions(
   targetType: 'post' | 'comment',
   targetId: string
 ): Promise<Record<ReactionType, number>> {
-  const { createClient } = await import('@supabase/supabase-js')
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
-
-  const { data } = await supabase
-    .from('reactions')
-    .select('reaction_type')
-    .eq('target_type', targetType)
-    .eq('target_id', targetId)
+  let data: any[] = []
+  
+  if (targetType === 'post') {
+    data = await prisma.reaction.findMany({
+      where: { postId: targetId },
+      select: { type: true }
+    })
+  } else {
+    data = await prisma.$queryRaw<any[]>`
+      SELECT reaction_type as type FROM reactions WHERE target_type = ${targetType} AND target_id = ${targetId}
+    `
+  }
 
   const counts: Record<ReactionType, number> = {
     like: 0, love: 0, insightful: 0, funny: 0,
@@ -131,7 +141,8 @@ export async function getReactions(
   }
 
   ;(data || []).forEach(r => {
-    counts[r.reaction_type as ReactionType]++
+    const rType = (r.type || r.reaction_type) as ReactionType
+    if (counts[rType] !== undefined) counts[rType]++
   })
 
   return counts
@@ -142,19 +153,18 @@ export async function getUserReaction(
   targetType: 'post' | 'comment',
   targetId: string
 ): Promise<ReactionType | null> {
-  const { createClient } = await import('@supabase/supabase-js')
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
+  let data;
+  if (targetType === 'post') {
+    data = await prisma.reaction.findFirst({
+      where: { userId, postId: targetId },
+      select: { type: true }
+    })
+  } else {
+    const rawData = await prisma.$queryRaw<any[]>`
+      SELECT reaction_type as type FROM reactions WHERE user_id = ${userId} AND target_type = ${targetType} AND target_id = ${targetId} LIMIT 1
+    `
+    data = rawData[0]
+  }
 
-  const { data } = await supabase
-    .from('reactions')
-    .select('reaction_type')
-    .eq('user_id', userId)
-    .eq('target_type', targetType)
-    .eq('target_id', targetId)
-    .single()
-
-  return (data?.reaction_type as ReactionType) || null
+  return (data?.type as ReactionType) || null
 }

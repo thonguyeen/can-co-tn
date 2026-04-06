@@ -1,5 +1,7 @@
 import { redirect } from 'next/navigation'
-import { createClient } from '@/lib/supabase/server'
+import { getServerSession } from 'next-auth'
+import { authOptions } from '@/lib/auth'
+import { prisma } from '@/lib/db'
 import { Header } from '@/components/layout/Header'
 import { Sidebar } from '@/components/layout/Sidebar'
 import { RightPanel } from '@/components/layout/RightPanel'
@@ -11,55 +13,45 @@ export default async function MainLayout({
 }: {
   children: React.ReactNode
 }) {
-  const supabase = await createClient()
-
-  // Get current user
-  const { data: { user } } = await supabase.auth.getUser()
+  const session = await getServerSession(authOptions)
+  const user = session?.user
 
   if (!user) {
     redirect('/login')
   }
 
-  // Get user profile
-  const { data: profileData } = await supabase
-    .from('profiles')
-    .select('*')
-    .eq('id', user.id)
-    .single()
+  const userId = (user as any).id;
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const profile = profileData as any
+  // Get user profile
+  const profileData = await prisma.$queryRaw<any[]>`SELECT * FROM profiles WHERE id = ${userId}::uuid LIMIT 1`
+  const profile = profileData[0]
 
   // Get followed bots
-  const { data: follows } = await supabase
-    .from('follows')
-    .select('bot_id')
-    .eq('user_id', user.id)
+  const follows = await prisma.$queryRaw<any[]>`SELECT bot_id FROM follows WHERE user_id = ${userId}::uuid`
 
   let followedBots: Bot[] = []
   if (follows && follows.length > 0) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const botIds = (follows as any[]).map((f) => f.bot_id)
-    const { data: bots } = await supabase
-      .from('bots')
-      .select('*')
-      .in('id', botIds)
+    const botIds = follows.map((f) => f.bot_id)
+    const botIdsStr = botIds.map((id) => `'${id}'`).join(',')
+    const bots = await prisma.$queryRawUnsafe<any[]>(`SELECT * FROM bots WHERE id IN (${botIdsStr})`)
     followedBots = (bots as Bot[]) || []
   }
 
   // Get all bots for suggestions (exclude followed)
   const followedBotIds = followedBots.map((b) => b.id)
-  const { data: suggestedBots } = await supabase
-    .from('bots')
-    .select('*')
-    .not('id', 'in', followedBotIds.length > 0 ? `(${followedBotIds.join(',')})` : '()')
-    .limit(3)
+  let suggestedBots = []
+  if (followedBotIds.length > 0) {
+     const excludeStr = followedBotIds.map(id => `'${id}'`).join(',')
+     suggestedBots = await prisma.$queryRawUnsafe<any[]>(`SELECT * FROM bots WHERE id NOT IN (${excludeStr}) LIMIT 3`)
+  } else {
+     suggestedBots = await prisma.$queryRaw<any[]>`SELECT * FROM bots LIMIT 3`
+  }
 
   const userData = {
-    id: user.id,
-    email: user.email,
-    display_name: profile?.display_name,
-    avatar_url: profile?.avatar_url,
+    id: userId,
+    email: user.email || '',
+    display_name: profile?.display_name || user.name || '',
+    avatar_url: profile?.avatar_url || user.image || '',
   }
 
   return (

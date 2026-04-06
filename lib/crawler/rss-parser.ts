@@ -26,14 +26,15 @@ export async function parseRSSFeed(source: NewsSource): Promise<RawArticle[]> {
 
     articles.push({
       source_id: source.id,
+      title: item.title,
+      content: item.contentSnippet || item.content || null,
+      summary: item.contentSnippet?.substring(0, 300) || null,
       original_url: item.link,
-      original_title: item.title,
-      original_content: item.contentSnippet || item.content || null,
-      original_published_at: item.pubDate || item.isoDate || null,
+      image_url: extractImageUrl(item) || null,
+      author: item.creator || item.author || null,
+      published_at: item.pubDate || item.isoDate || null,
       content_hash: contentHash,
       crawl_metadata: {
-        author: item.creator || item.author,
-        image_url: extractImageUrl(item),
         tags: item.categories,
       },
     })

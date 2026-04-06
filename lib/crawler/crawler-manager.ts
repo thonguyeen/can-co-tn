@@ -1,33 +1,22 @@
-import { createClient } from '@supabase/supabase-js'
+import { prisma } from '@/lib/db'
 import { parseRSSFeed } from './rss-parser'
 import { scrapeWebPage } from './web-scraper'
 import type { NewsSource, RawArticle, CrawlResult } from './types'
 
-function getSupabaseAdmin() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
-}
-
 export async function crawlSource(source: NewsSource): Promise<CrawlResult> {
   const startTime = Date.now()
-  const supabase = getSupabaseAdmin()
-
+  
   // Create crawl log entry
-  const { data: logEntry } = await supabase
-    .from('crawl_logs')
-    .insert({
-      source_id: source.id,
+  const logEntry = await prisma.crawlLog.create({
+    data: {
+      sourceId: source.id,
       status: 'running',
-    })
-    .select()
-    .single()
+    }
+  })
 
   try {
     // Fetch articles
     let articles: RawArticle[]
-
     if (source.rss_url) {
       articles = await parseRSSFeed(source)
     } else {
@@ -39,26 +28,39 @@ export async function crawlSource(source: NewsSource): Promise<CrawlResult> {
 
     // Insert new articles
     if (newArticles.length > 0) {
-      await supabase.from('raw_news').insert(newArticles)
+      await prisma.rawNews.createMany({
+        data: newArticles.map(a => ({
+          sourceId: a.source_id,
+          title: a.title,
+          content: a.content,
+          summary: a.summary,
+          originalUrl: a.original_url,
+          imageUrl: a.image_url,
+          author: a.author,
+          publishedAt: a.published_at ? new Date(a.published_at) : null,
+          contentHash: a.content_hash,
+          crawlMetadata: a.crawl_metadata as any
+        }))
+      })
     }
 
     // Update source last_crawled_at
-    await supabase
-      .from('sources')
-      .update({ last_crawled_at: new Date().toISOString() })
-      .eq('id', source.id)
+    await prisma.source.update({
+      where: { id: source.id },
+      data: { lastCrawledAt: new Date() }
+    })
 
     // Update crawl log
     if (logEntry) {
-      await supabase
-        .from('crawl_logs')
-        .update({
+      await prisma.crawlLog.update({
+        where: { id: logEntry.id },
+        data: {
           status: 'success',
-          completed_at: new Date().toISOString(),
-          articles_found: articles.length,
-          articles_new: newArticles.length,
-        })
-        .eq('id', logEntry.id)
+          completedAt: new Date(),
+          articlesFound: articles.length,
+          articlesNew: newArticles.length,
+        }
+      })
     }
 
     return {
@@ -69,18 +71,17 @@ export async function crawlSource(source: NewsSource): Promise<CrawlResult> {
       articles_new: newArticles.length,
       duration_ms: Date.now() - startTime,
     }
+
   } catch (error) {
-    // Update crawl log with error
     if (logEntry) {
-      await supabase
-        .from('crawl_logs')
-        .update({
+      await prisma.crawlLog.update({
+        where: { id: logEntry.id },
+        data: {
           status: 'failed',
-          completed_at: new Date().toISOString(),
-          error_message:
-            error instanceof Error ? error.message : 'Unknown error',
-        })
-        .eq('id', logEntry.id)
+          completedAt: new Date(),
+          errorMessage: error instanceof Error ? error.message : 'Unknown error',
+        }
+      })
     }
 
     return {
@@ -100,45 +101,47 @@ async function deduplicateArticles(
 ): Promise<RawArticle[]> {
   if (articles.length === 0) return []
 
-  const supabase = getSupabaseAdmin()
+  const hashes = articles.map(a => a.content_hash)
+  
+  const existing = await prisma.rawNews.findMany({
+    where: { contentHash: { in: hashes } },
+    select: { contentHash: true }
+  })
 
-  // Get existing content hashes
-  const hashes = articles.map((a) => a.content_hash)
+  const existingHashes = new Set(existing.map(e => e.contentHash))
 
-  const { data: existing } = await supabase
-    .from('raw_news')
-    .select('content_hash')
-    .in('content_hash', hashes)
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const existingHashes = new Set(
-    (existing as any[])?.map((e) => e.content_hash) || []
-  )
-
-  return articles.filter((a) => !existingHashes.has(a.content_hash))
+  return articles.filter(a => !existingHashes.has(a.content_hash))
 }
 
 export async function crawlAllSources(): Promise<CrawlResult[]> {
-  const supabase = getSupabaseAdmin()
-
-  // Get all active sources
-  const { data: sources } = await supabase
-    .from('sources')
-    .select('*')
-    .eq('is_active', true)
+  const sources = await prisma.source.findMany({
+    where: { isActive: true }
+  })
 
   if (!sources || sources.length === 0) {
     return []
   }
 
-  // Crawl sources in parallel (with limit)
   const CONCURRENT_LIMIT = 5
   const results: CrawlResult[] = []
 
-  for (let i = 0; i < sources.length; i += CONCURRENT_LIMIT) {
-    const batch = sources.slice(i, i + CONCURRENT_LIMIT)
+  // map PRISMA source back to NewsSource type for parser/scraper compat
+  const mappedSources: NewsSource[] = sources.map(s => ({
+    id: s.id,
+    name: s.name,
+    url: s.url,
+    rss_url: s.rssUrl,
+    credibility_score: s.credibilityScore || 0,
+    category: s.category ? [s.category] : [],
+    language: (s.language as any) || 'vi',
+    is_active: s.isActive || false,
+    last_crawled_at: s.lastCrawledAt?.toISOString() || null
+  }))
+
+  for (let i = 0; i < mappedSources.length; i += CONCURRENT_LIMIT) {
+    const batch = mappedSources.slice(i, i + CONCURRENT_LIMIT)
     const batchResults = await Promise.all(
-      batch.map((source) => crawlSource(source as NewsSource))
+      batch.map(source => crawlSource(source))
     )
     results.push(...batchResults)
   }
@@ -146,20 +149,26 @@ export async function crawlAllSources(): Promise<CrawlResult[]> {
   return results
 }
 
-export async function crawlSingleSource(
-  sourceId: string
-): Promise<CrawlResult> {
-  const supabase = getSupabaseAdmin()
+export async function crawlSingleSource(sourceId: string): Promise<CrawlResult> {
+  const s = await prisma.source.findUnique({
+    where: { id: sourceId }
+  })
 
-  const { data: source } = await supabase
-    .from('sources')
-    .select('*')
-    .eq('id', sourceId)
-    .single()
-
-  if (!source) {
+  if (!s) {
     throw new Error(`Source not found: ${sourceId}`)
   }
 
-  return crawlSource(source as NewsSource)
+  const mappedSource: NewsSource = {
+    id: s.id,
+    name: s.name,
+    url: s.url,
+    rss_url: s.rssUrl,
+    credibility_score: s.credibilityScore || 0,
+    category: s.category ? [s.category] : [],
+    language: (s.language as any) || 'vi',
+    is_active: s.isActive || false,
+    last_crawled_at: s.lastCrawledAt?.toISOString() || null
+  }
+
+  return crawlSource(mappedSource)
 }

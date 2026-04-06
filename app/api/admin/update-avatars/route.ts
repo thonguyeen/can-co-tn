@@ -1,10 +1,5 @@
 import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+import { prisma } from '@/lib/db';
 
 export async function POST() {
   try {
@@ -46,49 +41,44 @@ export async function POST() {
 
     // Update specific bots by handle
     for (const [handle, avatarUrl] of Object.entries(avatarMap)) {
-      const { error } = await supabase
-        .from('bots')
-        .update({ avatar_url: avatarUrl })
-        .eq('handle', handle);
-
-      if (error) {
-        results.push(`Failed: ${handle} - ${error.message}`);
-      } else {
+      try {
+        await prisma.bot.update({
+          where: { handle },
+          data: { avatarUrl },
+        });
         results.push(`Updated: ${handle} -> ${avatarUrl}`);
+      } catch {
+        results.push(`Failed: ${handle} - not found`);
       }
     }
 
     // Get all bots and assign avatars based on keywords
-    const { data: allBots } = await supabase
-      .from('bots')
-      .select('id, handle, name, avatar_url');
+    const allBots = await prisma.bot.findMany({
+      select: { id: true, handle: true, name: true, avatarUrl: true },
+    });
 
-    if (allBots) {
-      for (const bot of allBots) {
-        // Skip if already has a working avatar
-        if (bot.avatar_url && bot.avatar_url.includes('.svg')) continue;
+    for (const bot of allBots) {
+      // Skip if already has a working avatar
+      if (bot.avatarUrl && bot.avatarUrl.includes('.svg')) continue;
 
-        const handleLower = (bot.handle || '').toLowerCase();
-        const nameLower = (bot.name || '').toLowerCase();
+      const handleLower = (bot.handle || '').toLowerCase();
+      const nameLower = (bot.name || '').toLowerCase();
 
-        let matchedAvatar = '/avatars/bot_tech.svg'; // default
+      let matchedAvatar = '/avatars/bot_tech.svg'; // default
 
-        for (const [keyword, avatar] of Object.entries(keywordAvatars)) {
-          if (handleLower.includes(keyword) || nameLower.includes(keyword)) {
-            matchedAvatar = avatar;
-            break;
-          }
-        }
-
-        const { error } = await supabase
-          .from('bots')
-          .update({ avatar_url: matchedAvatar })
-          .eq('id', bot.id);
-
-        if (!error) {
-          results.push(`Auto-assigned: ${bot.handle} -> ${matchedAvatar}`);
+      for (const [keyword, avatar] of Object.entries(keywordAvatars)) {
+        if (handleLower.includes(keyword) || nameLower.includes(keyword)) {
+          matchedAvatar = avatar;
+          break;
         }
       }
+
+      await prisma.bot.update({
+        where: { id: bot.id },
+        data: { avatarUrl: matchedAvatar },
+      });
+
+      results.push(`Auto-assigned: ${bot.handle} -> ${matchedAvatar}`);
     }
 
     return NextResponse.json({

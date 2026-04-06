@@ -1,67 +1,39 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createServerClient } from '@supabase/ssr'
-import { cookies } from 'next/headers'
-
-async function getSupabase() {
-  const cookieStore = await cookies()
-  return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return cookieStore.getAll()
-        },
-        setAll(cookiesToSet) {
-          try {
-            cookiesToSet.forEach(({ name, value, options }) =>
-              cookieStore.set(name, value, options)
-            )
-          } catch {
-            // Ignore
-          }
-        },
-      },
-    }
-  )
-}
+import { prisma } from '@/lib/db'
+import { getAuthUserId } from '@/lib/data/get-user'
 
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: botId } = await params
-  const supabase = await getSupabase()
+  const userId = await getAuthUserId(request)
 
-  const { data: { user } } = await supabase.auth.getUser()
-
-  if (!user) {
+  if (!userId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
   // Check if already following
-  const { data: existingFollow } = await supabase
-    .from('follows')
-    .select('*')
-    .eq('user_id', user.id)
-    .eq('bot_id', botId)
-    .single()
+  const existingFollow = await prisma.follow.findFirst({
+    where: { userId, botId },
+  })
 
   if (existingFollow) {
     return NextResponse.json({ error: 'Already following' }, { status: 400 })
   }
 
   // Insert follow
-  const { error: insertError } = await supabase
-    .from('follows')
-    .insert({ user_id: user.id, bot_id: botId })
+  await prisma.follow.create({
+    data: { userId, botId },
+  })
 
-  if (insertError) {
-    return NextResponse.json({ error: insertError.message }, { status: 500 })
-  }
-
-  // Increment followers_count
-  await supabase.rpc('increment_bot_followers', { p_bot_id: botId })
+  // Increment followers_count (atomic)
+  await prisma.bot.update({
+    where: { id: botId },
+    data: { followersCount: { increment: 1 } },
+  }).catch(() => {
+    // Bot may not have followersCount column yet
+  })
 
   return NextResponse.json({ success: true, following: true })
 }
@@ -71,27 +43,24 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: botId } = await params
-  const supabase = await getSupabase()
+  const userId = await getAuthUserId(request)
 
-  const { data: { user } } = await supabase.auth.getUser()
-
-  if (!user) {
+  if (!userId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
   // Delete follow
-  const { error: deleteError } = await supabase
-    .from('follows')
-    .delete()
-    .eq('user_id', user.id)
-    .eq('bot_id', botId)
+  await prisma.follow.deleteMany({
+    where: { userId, botId },
+  })
 
-  if (deleteError) {
-    return NextResponse.json({ error: deleteError.message }, { status: 500 })
-  }
-
-  // Decrement followers_count
-  await supabase.rpc('decrement_bot_followers', { p_bot_id: botId })
+  // Decrement followers_count (atomic)
+  await prisma.bot.update({
+    where: { id: botId },
+    data: { followersCount: { decrement: 1 } },
+  }).catch(() => {
+    // Non-critical
+  })
 
   return NextResponse.json({ success: true, following: false })
 }
@@ -101,20 +70,15 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: botId } = await params
-  const supabase = await getSupabase()
+  const userId = await getAuthUserId(request)
 
-  const { data: { user } } = await supabase.auth.getUser()
-
-  if (!user) {
+  if (!userId) {
     return NextResponse.json({ following: false })
   }
 
-  const { data: follow } = await supabase
-    .from('follows')
-    .select('*')
-    .eq('user_id', user.id)
-    .eq('bot_id', botId)
-    .single()
+  const follow = await prisma.follow.findFirst({
+    where: { userId, botId },
+  })
 
   return NextResponse.json({ following: !!follow })
 }

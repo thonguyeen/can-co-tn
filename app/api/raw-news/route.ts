@@ -1,12 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
-
-function getSupabaseAdmin() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
-}
+import { prisma } from '@/lib/db'
+import { toSnakeCase } from '@/lib/data/helpers'
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url)
@@ -14,30 +8,26 @@ export async function GET(req: NextRequest) {
   const offset = parseInt(searchParams.get('offset') || '0')
   const processed = searchParams.get('processed')
 
-  const supabase = getSupabaseAdmin()
-
-  let query = supabase
-    .from('raw_news')
-    .select(
-      `
-      *,
-      sources (name, credibility_score)
-    `
-    )
-    .order('created_at', { ascending: false })
-    .range(offset, offset + limit - 1)
-
+  // Build where clause
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const where: any = {}
   if (processed === 'true') {
-    query = query.eq('is_processed', true)
+    where.isProcessed = true
   } else if (processed === 'false') {
-    query = query.eq('is_processed', false)
+    where.isProcessed = false
   }
 
-  const { data, error } = await query
+  const data = await prisma.rawNews.findMany({
+    where,
+    include: {
+      source: {
+        select: { name: true, credibilityScore: true },
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+    skip: offset,
+    take: limit,
+  })
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
-  }
-
-  return NextResponse.json({ news: data })
+  return NextResponse.json({ news: toSnakeCase(data) })
 }

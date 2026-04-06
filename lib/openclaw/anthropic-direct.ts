@@ -10,6 +10,7 @@ const anthropic = new Anthropic({
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
+  ...(process.env.OPENAI_BASE_URL ? { baseURL: process.env.OPENAI_BASE_URL } : {}),
 });
 
 interface ChatOptions {
@@ -46,7 +47,7 @@ async function openaiChatDirect(
   options?: ChatOptions
 ): Promise<string> {
   const response = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
+    model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
     max_tokens: options?.maxTokens || 1024,
     messages: [
       { role: 'system', content: systemPrompt },
@@ -101,7 +102,7 @@ async function openaiChatWithHistoryDirect(
   ];
 
   const response = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
+    model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
     max_tokens: options?.maxTokens || 1024,
     messages,
   });

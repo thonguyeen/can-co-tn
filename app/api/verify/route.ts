@@ -3,14 +3,7 @@ import {
   verifyNews,
   verifyPendingNews,
 } from '@/lib/ai/agents/verification-agent'
-import { createClient } from '@supabase/supabase-js'
-
-function getSupabaseAdmin() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
-}
+import { prisma } from '@/lib/db'
 
 export async function POST(req: NextRequest) {
   try {
@@ -52,32 +45,26 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // Otherwise return stats
-  const supabase = getSupabaseAdmin()
-
-  // Count by status
-  const { data: posts } = await supabase.from('posts').select('verification_status')
+  // Otherwise return stats — Prisma version
+  const posts = await prisma.post.findMany({
+    select: { verificationStatus: true },
+  })
 
   const stats = {
-    total: posts?.length || 0,
-    unverified:
-      posts?.filter((p) => p.verification_status === 'unverified').length || 0,
-    partial:
-      posts?.filter((p) => p.verification_status === 'partial').length || 0,
-    verified:
-      posts?.filter((p) => p.verification_status === 'verified').length || 0,
-    debunked:
-      posts?.filter((p) => p.verification_status === 'debunked').length || 0,
+    total: posts.length,
+    unverified: posts.filter((p) => p.verificationStatus === 'unverified').length,
+    partial: posts.filter((p) => p.verificationStatus === 'partial').length,
+    verified: posts.filter((p) => p.verificationStatus === 'verified').length,
+    debunked: posts.filter((p) => p.verificationStatus === 'debunked').length,
   }
 
   // Pending raw news
-  const { count: pendingCount } = await supabase
-    .from('raw_news')
-    .select('*', { count: 'exact', head: true })
-    .eq('is_processed', false)
+  const pendingCount = await prisma.rawNews.count({
+    where: { isProcessed: false },
+  })
 
   return NextResponse.json({
     stats,
-    pending_verification: pendingCount || 0,
+    pending_verification: pendingCount,
   })
 }

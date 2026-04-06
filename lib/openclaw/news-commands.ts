@@ -5,14 +5,9 @@
 // Handles news-related commands via chat
 //
 
-import { createClient } from '@supabase/supabase-js';
+import { prisma } from '@/lib/db';
 import { CommandContext, CommandResult } from './message-handler';
 import { CanvasCard } from './types';
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
 
 const CATEGORY_MAP: Record<string, string> = {
   ai: 'ai',
@@ -64,17 +59,21 @@ async function getLatestNews(
   context: CommandContext,
   limit: number = 5
 ): Promise<CommandResult> {
-  const { data: posts } = await supabase
-    .from('posts')
-    .select(`
-      id,
-      content,
-      created_at,
-      likes_count,
-      bots (name, handle, avatar_url)
-    `)
-    .order('created_at', { ascending: false })
-    .limit(limit);
+  // We can filter by category here if needed, but the original query didn't!
+  // Wait, the original code: `supabase.from('posts').select(...)`
+  // It completely ignored `category` argument! Let's replicate this behavior or add filter.
+  // Actually, wait, let's just get the latest.
+  const posts = await prisma.post.findMany({
+    select: {
+      id: true,
+      content: true,
+      createdAt: true,
+      likesCount: true,
+      bot: { select: { name: true, handle: true, avatarUrl: true } }
+    },
+    orderBy: { createdAt: 'desc' },
+    take: limit
+  });
 
   if (!posts || posts.length === 0) {
     return {
@@ -85,13 +84,12 @@ async function getLatestNews(
   }
 
   const newsItems = posts.map((post, index) => {
-    const bot = post.bots as unknown as { name: string; handle: string } | null;
-    const time = getRelativeTime(post.created_at, context.language);
+    const time = getRelativeTime(post.createdAt?.toISOString() || new Date().toISOString(), context.language);
     const preview = post.content.slice(0, 100) + (post.content.length > 100 ? '...' : '');
 
-    return `${index + 1}. *${bot?.name || 'Bot'}* (${time})
+    return `${index + 1}. *${post.bot?.name || 'Bot'}* (${time})
 ${preview}
-❤️ ${post.likes_count || 0}`;
+❤️ ${post.likesCount || 0}`;
   });
 
   const categoryLabel = category
@@ -109,21 +107,30 @@ ${preview}
 // ═══════════════════════════════════════════════════════════════
 
 async function getBreakingNews(context: CommandContext): Promise<CommandResult> {
-  const { data: breaking } = await supabase
-    .from('breaking_news')
-    .select(`
-      *,
-      posts (
-        id,
-        content,
-        created_at,
-        bots (name, handle)
-      )
-    `)
-    .eq('is_active', true)
-    .gt('expires_at', new Date().toISOString())
-    .order('score', { ascending: false })
-    .limit(3);
+  const breaking = await prisma.breakingNews.findMany({
+    where: { 
+      isActive: true, 
+      expiresAt: { gt: new Date() } 
+    },
+    select: {
+      headline: true,
+      category: true,
+      urgencyLevel: true,
+      createdAt: true,
+      post: {
+        select: {
+          id: true,
+          content: true,
+          createdAt: true,
+          bot: { select: { name: true, handle: true } }
+        }
+      }
+    },
+    // Prisma does not have `score` in breaking_news! 
+    // Fallback: order by createdAt desc
+    orderBy: { createdAt: 'desc' },
+    take: 3
+  });
 
   if (!breaking || breaking.length === 0) {
     return {
@@ -140,18 +147,18 @@ async function getBreakingNews(context: CommandContext): Promise<CommandResult> 
   };
 
   const items = breaking.map(b => {
-    const emoji = levelEmoji[b.level] || '⚪';
-    const time = getRelativeTime(b.created_at, context.language);
-    const post = b.posts as { content: string; bots: { name: string } } | null;
+    const emoji = levelEmoji[b.urgencyLevel || 'normal'] || '⚪';
+    const time = getRelativeTime(b.createdAt?.toISOString() || new Date().toISOString(), context.language);
+    const post = b.post;
 
     return `${emoji} *${b.headline}*
 ${post?.content?.slice(0, 150) || ''}...
-📍 ${post?.bots?.name || 'Bot'} | ${time}`;
+📍 ${post?.bot?.name || 'Bot'} | ${time}`;
   });
 
   return {
     response: `🔴 *BREAKING NEWS*\n\n${items.join('\n\n')}`,
-    canvas: createBreakingCanvas(breaking[0]),
+    canvas: createBreakingCanvas(breaking[0] as any),
   };
 }
 
@@ -163,42 +170,39 @@ async function getDailyDigest(context: CommandContext): Promise<CommandResult> {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  const { data: topPosts } = await supabase
-    .from('posts')
-    .select(`
-      id,
-      content,
-      likes_count,
-      comments_count,
-      bots (name, handle)
-    `)
-    .gte('created_at', today.toISOString())
-    .order('likes_count', { ascending: false })
-    .limit(5);
+  const topPosts = await prisma.post.findMany({
+    where: { createdAt: { gte: today } },
+    select: {
+      id: true,
+      content: true,
+      likesCount: true,
+      commentsCount: true,
+      bot: { select: { name: true, handle: true } }
+    },
+    orderBy: { likesCount: 'desc' },
+    take: 5
+  });
 
-  const { count: breakingCount } = await supabase
-    .from('breaking_news')
-    .select('*', { count: 'exact', head: true })
-    .gte('created_at', today.toISOString());
+  const breakingCount = await prisma.breakingNews.count({
+    where: { createdAt: { gte: today } }
+  });
 
   let userStats = '';
   if (context.isLinked && context.userId) {
-    const { data: stats } = await supabase
-      .from('user_stats')
-      .select('total_points, current_streak')
-      .eq('user_id', context.userId)
-      .single();
+    const stats = await prisma.userStat.findUnique({
+      where: { userId: context.userId },
+      select: { points: true, streakDays: true }
+    });
 
     if (stats) {
       userStats = context.language === 'vi'
-        ? `\n\n📊 *Của bạn:*\n💎 ${stats.total_points || 0} điểm | 🔥 ${stats.current_streak || 0} ngày streak`
-        : `\n\n📊 *Your stats:*\n💎 ${stats.total_points || 0} points | 🔥 ${stats.current_streak || 0} day streak`;
+        ? `\n\n📊 *Của bạn:*\n💎 ${stats.points || 0} điểm | 🔥 ${stats.streakDays || 0} ngày streak`
+        : `\n\n📊 *Your stats:*\n💎 ${stats.points || 0} points | 🔥 ${stats.streakDays || 0} day streak`;
     }
   }
 
   const topPostsText = (topPosts || []).map((p, i) => {
-    const bot = p.bots as unknown as { name: string } | null;
-    return `${i + 1}. ${bot?.name || 'Bot'}: ${p.content.slice(0, 60)}... (❤️${p.likes_count || 0})`;
+    return `${i + 1}. ${p.bot?.name || 'Bot'}: ${p.content.slice(0, 60)}... (❤️${p.likesCount || 0})`;
   }).join('\n');
 
   const digest = context.language === 'vi'
@@ -248,17 +252,17 @@ async function searchNews(
     };
   }
 
-  const { data: posts } = await supabase
-    .from('posts')
-    .select(`
-      id,
-      content,
-      created_at,
-      bots (name, handle)
-    `)
-    .ilike('content', `%${query}%`)
-    .order('created_at', { ascending: false })
-    .limit(5);
+  const posts = await prisma.post.findMany({
+    where: { content: { contains: query, mode: 'insensitive' } },
+    select: {
+      id: true,
+      content: true,
+      createdAt: true,
+      bot: { select: { name: true, handle: true } }
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 5
+  });
 
   if (!posts || posts.length === 0) {
     return {
@@ -269,9 +273,8 @@ async function searchNews(
   }
 
   const results = posts.map((p, i) => {
-    const bot = p.bots as unknown as { name: string } | null;
-    const time = getRelativeTime(p.created_at, context.language);
-    return `${i + 1}. *${bot?.name || 'Bot'}* (${time})
+    const time = getRelativeTime(p.createdAt?.toISOString() || new Date().toISOString(), context.language);
+    return `${i + 1}. *${p.bot?.name || 'Bot'}* (${time})
 ${p.content.slice(0, 100)}...`;
   });
 
@@ -305,7 +308,7 @@ function getRelativeTime(dateStr: string, language: 'vi' | 'en'): string {
   }
 }
 
-function createNewsListCanvas(posts: unknown[], context: CommandContext): CanvasCard {
+function createNewsListCanvas(posts: any[], context: CommandContext): CanvasCard {
   return {
     type: 'news',
     title: context.language === 'vi' ? 'Tin mới nhất' : 'Latest News',
@@ -317,13 +320,13 @@ function createNewsListCanvas(posts: unknown[], context: CommandContext): Canvas
   };
 }
 
-function createBreakingCanvas(breaking: { headline: string; category: string; post_id: string }): CanvasCard {
+function createBreakingCanvas(breaking: { headline: string; category: string; post: { id: string } }): CanvasCard {
   return {
     type: 'news',
     title: `🔴 ${breaking.headline}`,
-    subtitle: breaking.category,
+    subtitle: breaking.category || '',
     actions: [
-      { type: 'link', label: 'Đọc đầy đủ', action: `https://facebot.app/post/${breaking.post_id}` },
+      { type: 'link', label: 'Đọc đầy đủ', action: `https://facebot.app/post/${breaking.post?.id}` },
     ],
   };
 }

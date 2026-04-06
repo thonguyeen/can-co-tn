@@ -5,13 +5,8 @@
 // Track entities (companies, people, topics) user cares about
 //
 
-import { createClient } from '@supabase/supabase-js';
+import { prisma } from '@/lib/db';
 import { recordInterestSignal } from '../interests/interest-tracker';
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
 
 export type WatchlistEntityType =
   | 'company'
@@ -46,24 +41,12 @@ export async function addToWatchlist(
   userId: string,
   item: Omit<WatchlistItem, 'id' | 'userId' | 'mentionCount' | 'createdAt'>
 ): Promise<WatchlistItem> {
-  const { data, error } = await supabase
-    .from('watchlist')
-    .insert({
-      user_id: userId,
-      entity_type: item.entityType,
-      entity_name: item.entityName,
-      entity_id: item.entityId,
-      keywords: item.keywords || [item.entityName.toLowerCase()],
-      alert_on_mention: item.alertOnMention ?? true,
-      alert_on_breaking: item.alertOnBreaking ?? true,
-      alert_on_price_change: item.alertOnPriceChange,
-      notes: item.notes,
-      mention_count: 0,
-    })
-    .select()
-    .single();
-
-  if (error) throw error;
+  const result = await prisma.$queryRaw<any[]>`
+    INSERT INTO watchlist (user_id, entity_type, entity_name, entity_id, keywords, alert_on_mention, alert_on_breaking, alert_on_price_change, notes, mention_count)
+    VALUES (${userId}, ${item.entityType}, ${item.entityName}, ${item.entityId || null}, ${JSON.stringify(item.keywords || [item.entityName.toLowerCase()])}::jsonb, ${item.alertOnMention ?? true}, ${item.alertOnBreaking ?? true}, ${item.alertOnPriceChange || null}, ${item.notes || null}, 0)
+    RETURNING *
+  `;
+  const data = result[0];
 
   // Record as interest
   await recordInterestSignal(userId, {
@@ -80,28 +63,16 @@ export async function removeFromWatchlist(
   userId: string,
   itemId: string
 ): Promise<void> {
-  await supabase
-    .from('watchlist')
-    .delete()
-    .eq('user_id', userId)
-    .eq('id', itemId);
+  await prisma.$executeRaw`DELETE FROM watchlist WHERE user_id = ${userId} AND id = ${itemId}::uuid`;
 }
 
 export async function getWatchlist(
   userId: string,
   entityType?: WatchlistEntityType
 ): Promise<WatchlistItem[]> {
-  let query = supabase
-    .from('watchlist')
-    .select('*')
-    .eq('user_id', userId)
-    .order('created_at', { ascending: false });
-
-  if (entityType) {
-    query = query.eq('entity_type', entityType);
-  }
-
-  const { data } = await query;
+  const data = entityType 
+    ? await prisma.$queryRaw<any[]>`SELECT * FROM watchlist WHERE user_id = ${userId} AND entity_type = ${entityType} ORDER BY created_at DESC`
+    : await prisma.$queryRaw<any[]>`SELECT * FROM watchlist WHERE user_id = ${userId} ORDER BY created_at DESC`;
 
   return (data || []).map(mapToWatchlistItem);
 }
@@ -110,18 +81,29 @@ export async function updateWatchlistItem(
   itemId: string,
   updates: Partial<WatchlistItem>
 ): Promise<void> {
-  const dbUpdates: Record<string, unknown> = {};
+  const ds: string[] = [];
 
-  if (updates.alertOnMention !== undefined) dbUpdates.alert_on_mention = updates.alertOnMention;
-  if (updates.alertOnBreaking !== undefined) dbUpdates.alert_on_breaking = updates.alertOnBreaking;
-  if (updates.alertOnPriceChange !== undefined) dbUpdates.alert_on_price_change = updates.alertOnPriceChange;
-  if (updates.keywords !== undefined) dbUpdates.keywords = updates.keywords;
-  if (updates.notes !== undefined) dbUpdates.notes = updates.notes;
+  // Manual update builder for raw sql
+  if (updates.alertOnMention !== undefined) ds.push(`alert_on_mention = ${updates.alertOnMention ? 'true' : 'false'}`);
+  if (updates.alertOnBreaking !== undefined) ds.push(`alert_on_breaking = ${updates.alertOnBreaking ? 'true' : 'false'}`);
+  if (updates.alertOnPriceChange !== undefined) ds.push(`alert_on_price_change = ${updates.alertOnPriceChange}`);
+  if (updates.keywords !== undefined) {
+    // We update keywords through a specific executeRaw below to avoid complex manual sanitizing of JSON strings here
+  }
+  if (updates.notes !== undefined) {
+    // ditto
+  }
 
-  await supabase
-    .from('watchlist')
-    .update(dbUpdates)
-    .eq('id', itemId);
+  if (ds.length > 0) {
+    await prisma.$executeRawUnsafe(`UPDATE watchlist SET ${ds.join(', ')} WHERE id = '${itemId}'`);
+  }
+
+  if (updates.keywords !== undefined) {
+    await prisma.$executeRaw`UPDATE watchlist SET keywords = ${JSON.stringify(updates.keywords)}::jsonb WHERE id = ${itemId}::uuid`;
+  }
+  if (updates.notes !== undefined) {
+    await prisma.$executeRaw`UPDATE watchlist SET notes = ${updates.notes} WHERE id = ${itemId}::uuid`;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -134,11 +116,9 @@ export async function findMatchingWatchlistItems(
 ): Promise<{ item: WatchlistItem; userId: string }[]> {
   const contentLower = content.toLowerCase();
 
-  // Get all watchlist items
-  const { data: items } = await supabase
-    .from('watchlist')
-    .select('*')
-    .eq(isBreaking ? 'alert_on_breaking' : 'alert_on_mention', true);
+  const items = isBreaking
+    ? await prisma.$queryRaw<any[]>`SELECT * FROM watchlist WHERE alert_on_breaking = true`
+    : await prisma.$queryRaw<any[]>`SELECT * FROM watchlist WHERE alert_on_mention = true`;
 
   if (!items) return [];
 
@@ -158,13 +138,11 @@ export async function findMatchingWatchlistItems(
       });
 
       // Update mention stats
-      await supabase
-        .from('watchlist')
-        .update({
-          last_mention_at: new Date().toISOString(),
-          mention_count: item.mention_count + 1,
-        })
-        .eq('id', item.id);
+      await prisma.$executeRaw`
+        UPDATE watchlist 
+        SET last_mention_at = NOW(), mention_count = mention_count + 1 
+        WHERE id = ${item.id}::uuid
+      `;
     }
   }
 
@@ -191,12 +169,8 @@ export async function sendWatchlistAlerts(
 
   for (const { item, userId } of matches) {
     // Get user's channel
-    const { data: channel } = await supabase
-      .from('user_channels')
-      .select('channel, channel_id')
-      .eq('user_id', userId)
-      .eq('is_primary', true)
-      .maybeSingle();
+    const channels = await prisma.$queryRaw<any[]>`SELECT channel, channel_id FROM user_channels WHERE user_id = ${userId} AND is_primary = true LIMIT 1`;
+    const channel = channels[0];
 
     if (!channel) continue;
 

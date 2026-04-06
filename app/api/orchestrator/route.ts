@@ -34,9 +34,11 @@ export async function GET(request: NextRequest) {
 
     case 'activities':
       const limit = parseInt(searchParams.get('limit') || '20');
+      const botHandle = searchParams.get('bot_handle') || 'all';
+      const statusFilter = searchParams.get('status') || 'all';
       return NextResponse.json({
         success: true,
-        data: orchestrator.getRecentActivities(limit),
+        data: orchestrator.getRecentActivities(limit, { botHandle, status: statusFilter }),
       });
 
     case 'debates':
@@ -95,6 +97,21 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({
           success: true,
           message: 'Orchestrator stopped',
+          data: orchestrator.getStatus(),
+        });
+
+      case 'set_mode':
+        const { mode } = params;  // 'test' or 'live'
+        if (mode !== 'test' && mode !== 'live') {
+          return NextResponse.json(
+            { success: false, error: 'mode must be "test" or "live"' },
+            { status: 400 }
+          );
+        }
+        orchestrator.setMode(mode === 'test');
+        return NextResponse.json({
+          success: true,
+          message: `Mode switched to ${mode.toUpperCase()}`,
           data: orchestrator.getStatus(),
         });
 

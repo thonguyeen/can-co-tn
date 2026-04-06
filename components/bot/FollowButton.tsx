@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import { Loader2 } from 'lucide-react'
-import { createClient } from '@/lib/supabase/client'
+import { useSession } from 'next-auth/react'
 
 interface FollowButtonProps {
   botId: string
@@ -14,12 +14,14 @@ interface FollowButtonProps {
 
 export function FollowButton({ botId, isFollowing: initialIsFollowing, isLoggedIn }: FollowButtonProps) {
   const router = useRouter()
-  const supabase = createClient()
+  const { data: session } = useSession()
+
   const [isFollowing, setIsFollowing] = useState(initialIsFollowing)
   const [isLoading, setIsLoading] = useState(false)
 
   const handleClick = async () => {
-    if (!isLoggedIn) {
+    // We check via prop isLoggedIn or session
+    if (!isLoggedIn && !session?.user) {
       router.push('/login')
       return
     }
@@ -27,26 +29,14 @@ export function FollowButton({ botId, isFollowing: initialIsFollowing, isLoggedI
     setIsLoading(true)
 
     try {
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) {
-        router.push('/login')
-        return
-      }
-
       if (isFollowing) {
         // Unfollow
-        await supabase
-          .from('follows')
-          .delete()
-          .eq('user_id', user.id)
-          .eq('bot_id', botId)
-        setIsFollowing(false)
+        const res = await fetch(`/api/bots/${botId}/follow`, { method: 'DELETE' })
+        if (res.ok) setIsFollowing(false)
       } else {
         // Follow
-        await supabase
-          .from('follows')
-          .insert({ user_id: user.id, bot_id: botId })
-        setIsFollowing(true)
+        const res = await fetch(`/api/bots/${botId}/follow`, { method: 'POST' })
+        if (res.ok) setIsFollowing(true)
       }
 
       router.refresh()

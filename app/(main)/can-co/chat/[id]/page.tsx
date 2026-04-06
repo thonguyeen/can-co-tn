@@ -5,7 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ArrowLeft, Send, Loader2 } from 'lucide-react';
 import { cn, formatDistanceToNow } from '@/lib/utils';
-import { createClient } from '@/lib/supabase/client';
+import { useSession } from 'next-auth/react';
 
 interface Message {
   id: string;
@@ -34,6 +34,7 @@ export default function ChatRoomPage() {
   const [convInfo, setConvInfo] = useState<ConvInfo | null>(null);
   const [otherPartyName, setOtherPartyName] = useState('');
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const { data: session, status } = useSession();
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [isSending, setIsSending] = useState(false);
@@ -47,11 +48,11 @@ export default function ChatRoomPage() {
   // Load conversation + messages + current user
   useEffect(() => {
     async function load() {
+      if (status === 'loading') return;
+      
       try {
-        const supabase = createClient();
-        const { data: { user } } = await supabase.auth.getUser();
-        if (!user) { router.push('/login'); return; }
-        setCurrentUserId(user.id);
+        if (!session?.user) { router.push('/login'); return; }
+        setCurrentUserId(session.user.id);
 
         // Fetch messages
         const msgRes = await fetch(`/api/chat/${convId}/messages`);
@@ -81,40 +82,35 @@ export default function ChatRoomPage() {
     scrollToBottom();
   }, [messages, scrollToBottom]);
 
-  // Supabase Realtime subscription
+  // Poll for new messages every 3 seconds (replaces Supabase Realtime)
   useEffect(() => {
-    const supabase = createClient();
+    if (!currentUserId || isLoading) return;
 
-    const channel = supabase
-      .channel(`chat-${convId}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'messages',
-          filter: `conversation_id=eq.${convId}`,
-        },
-        (payload) => {
-          const newMsg = payload.new as Message;
-          setMessages((prev) => {
-            // Avoid duplicates (from optimistic update)
-            if (prev.some((m) => m.id === newMsg.id)) return prev;
-            return [...prev, newMsg];
-          });
-
-          // Mark as read if from other person
-          if (newMsg.sender_id !== currentUserId) {
-            fetch(`/api/chat/${convId}/read`, { method: 'PUT' }).catch(() => {});
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/chat/${convId}/messages`);
+        if (!res.ok) return;
+        const freshMessages = await res.json();
+        setMessages((prev) => {
+          // Only update if there are genuinely new messages
+          if (freshMessages.length !== prev.length) {
+            return freshMessages;
           }
-        },
-      )
-      .subscribe();
+          // Check if latest message differs
+          const lastFresh = freshMessages[freshMessages.length - 1];
+          const lastPrev = prev[prev.length - 1];
+          if (lastFresh?.id !== lastPrev?.id) {
+            return freshMessages;
+          }
+          return prev; // No change — skip re-render
+        });
+      } catch {
+        // Polling failure is non-critical
+      }
+    }, 3000);
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [convId, currentUserId]);
+    return () => clearInterval(interval);
+  }, [convId, currentUserId, isLoading]);
 
   const handleSend = async () => {
     if (!inputText.trim() || isSending) return;

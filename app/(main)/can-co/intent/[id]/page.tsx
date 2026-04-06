@@ -11,6 +11,7 @@ import { VerifySection } from '@/components/intent/VerifySection';
 import { BottomNav } from '@/components/intent/BottomNav';
 import { cn } from '@/lib/utils';
 import { formatDistanceToNow } from '@/lib/utils';
+import { useSession } from 'next-auth/react';
 import type { MockIntent } from '@/lib/mock/intents';
 
 interface IntentDetail extends MockIntent {
@@ -46,6 +47,7 @@ export default function RealIntentDetailPage() {
 
   const [intent, setIntent] = useState<IntentDetail | null>(null);
   const [matches, setMatches] = useState<MatchData[]>([]);
+  const { data: session } = useSession();
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [commentText, setCommentText] = useState('');
@@ -53,14 +55,10 @@ export default function RealIntentDetailPage() {
   const [isChatting, setIsChatting] = useState(false);
 
   useEffect(() => {
+    setCurrentUserId(session?.user?.id || null);
+    
     async function load() {
       try {
-        // Get current user
-        const { createClient } = await import('@/lib/supabase/client');
-        const supabase = createClient();
-        const { data: { user } } = await supabase.auth.getUser();
-        if (user) setCurrentUserId(user.id);
-
         const [intentRes, matchRes] = await Promise.all([
           fetch(`/api/intents/${id}`),
           fetch(`/api/intents/${id}/matches`).catch(() => null),

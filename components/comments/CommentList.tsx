@@ -5,7 +5,7 @@ import { CommentItem, type Comment } from './CommentItem'
 import { CommentInput } from './CommentInput'
 import { BotTypingIndicator } from './BotTypingIndicator'
 import { MessageCircle } from 'lucide-react'
-import { createClient } from '@/lib/supabase/client'
+import { useSession } from 'next-auth/react'
 
 interface CommentListProps {
   postId: string
@@ -20,7 +20,7 @@ export function CommentList({
   botAvatarUrl,
   botColorAccent,
 }: CommentListProps) {
-  const supabase = createClient()
+  const { data: session } = useSession()
   const [comments, setComments] = useState<Comment[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [user, setUser] = useState<{
@@ -35,27 +35,19 @@ export function CommentList({
   const [showTypingIndicator, setShowTypingIndicator] = useState(false)
 
   // Fetch user
+  // Sync user with NextAuth session
   useEffect(() => {
-    const getUser = async () => {
-      const {
-        data: { user: authUser },
-      } = await supabase.auth.getUser()
-      if (authUser) {
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('display_name, avatar_url')
-          .eq('id', authUser.id)
-          .single()
-
-        setUser({
-          id: authUser.id,
-          display_name: profile?.display_name || authUser.email,
-          avatar_url: profile?.avatar_url,
-        })
-      }
+    if (session?.user) {
+      // session.user from nextauth typically contains id, name, email, image
+      setUser({
+        id: session.user.id || '',
+        display_name: session.user.name || session.user.email || null,
+        avatar_url: session.user.image || null,
+      })
+    } else {
+      setUser(null)
     }
-    getUser()
-  }, [supabase])
+  }, [session])
 
   // Fetch comments
   const fetchComments = useCallback(async () => {
@@ -73,32 +65,6 @@ export function CommentList({
   useEffect(() => {
     fetchComments()
   }, [fetchComments])
-
-  // Subscribe to realtime comments
-  useEffect(() => {
-    const channel = supabase
-      .channel(`comments:${postId}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'comments',
-          filter: `post_id=eq.${postId}`,
-        },
-        () => {
-          // Refetch comments when new comment is added
-          fetchComments()
-          // Hide typing indicator
-          setShowTypingIndicator(false)
-        }
-      )
-      .subscribe()
-
-    return () => {
-      supabase.removeChannel(channel)
-    }
-  }, [supabase, postId, fetchComments])
 
   const handleReply = (commentId: string, authorName: string) => {
     setReplyTo({ commentId, authorName })

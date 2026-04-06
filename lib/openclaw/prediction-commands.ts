@@ -5,14 +5,9 @@
 // Handles prediction market commands via chat
 //
 
-import { createClient } from '@supabase/supabase-js';
+import { prisma } from '@/lib/db';
 import { CommandContext, CommandResult } from './message-handler';
 import { CanvasCard } from './types';
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
 
 // ═══════════════════════════════════════════════════════════════
 // MAIN HANDLER
@@ -55,12 +50,12 @@ export async function handlePredictionCommand(
 // ═══════════════════════════════════════════════════════════════
 
 async function listOpenPredictions(context: CommandContext): Promise<CommandResult> {
-  const { data: predictions } = await supabase
-    .from('predictions')
-    .select('*')
-    .eq('status', 'open')
-    .order('created_at', { ascending: false })
-    .limit(5);
+  const predictions = await prisma.$queryRaw<any[]>`
+    SELECT * FROM predictions 
+    WHERE status = 'open' 
+    ORDER BY created_at DESC 
+    LIMIT 5
+  `;
 
   if (!predictions || predictions.length === 0) {
     return {
@@ -118,12 +113,12 @@ async function handleVote(
   }
 
   // Find prediction by partial ID
-  const { data: prediction } = await supabase
-    .from('predictions')
-    .select('*')
-    .ilike('id', `${predictionId}%`)
-    .eq('status', 'open')
-    .single();
+  const predictions = await prisma.$queryRaw<any[]>`
+    SELECT * FROM predictions 
+    WHERE id ILIKE ${predictionId + '%'} AND status = 'open' 
+    LIMIT 1
+  `;
+  const prediction = predictions[0];
 
   if (!prediction) {
     return {
@@ -134,14 +129,13 @@ async function handleVote(
   }
 
   // Check if already voted
-  const { data: existingVote } = await supabase
-    .from('user_predictions')
-    .select('id')
-    .eq('user_id', context.userId)
-    .eq('prediction_id', prediction.id)
-    .single();
+  const existingVote = await prisma.$queryRaw<any[]>`
+    SELECT id FROM user_predictions 
+    WHERE user_id = ${context.userId} AND prediction_id = ${prediction.id} 
+    LIMIT 1
+  `;
 
-  if (existingVote) {
+  if (existingVote && existingVote.length > 0) {
     return {
       response: context.language === 'vi'
         ? '❌ Bạn đã vote cho dự đoán này rồi.'
@@ -170,15 +164,15 @@ async function handleVote(
   }
 
   // Record vote
-  const { error } = await supabase.from('user_predictions').insert({
-    user_id: context.userId,
-    prediction_id: prediction.id,
-    selected_option: actualOptionId,
-    confidence: Math.min(10, Math.max(1, confidence)),
-    source: 'openclaw',
-  });
+  try {
+    await prisma.$executeRaw`
+      INSERT INTO user_predictions (user_id, prediction_id, selected_option, confidence, source)
+      VALUES (${context.userId}, ${prediction.id}, ${actualOptionId}, ${Math.min(10, Math.max(1, confidence))}, 'openclaw')
+    `;
 
-  if (error) {
+    // Update vote count
+    await prisma.$executeRaw`SELECT increment_prediction_vote(${prediction.id}, ${actualOptionId})`;
+  } catch (error) {
     console.error('Vote error:', error);
     return {
       response: context.language === 'vi'
@@ -186,12 +180,6 @@ async function handleVote(
         : '❌ Error recording vote. Try again later.',
     };
   }
-
-  // Update vote count
-  await supabase.rpc('increment_prediction_vote', {
-    p_prediction_id: prediction.id,
-    p_option_id: actualOptionId,
-  });
 
   return {
     response: context.language === 'vi'
@@ -217,15 +205,15 @@ Results will be announced when closed. Good luck! 🍀`,
 // ═══════════════════════════════════════════════════════════════
 
 async function getMyPredictions(context: CommandContext): Promise<CommandResult> {
-  const { data: userPredictions } = await supabase
-    .from('user_predictions')
-    .select(`
-      *,
-      predictions (question, status, correct_option)
-    `)
-    .eq('user_id', context.userId)
-    .order('created_at', { ascending: false })
-    .limit(10);
+  const userPredictions = await prisma.$queryRaw<any[]>`
+    SELECT up.*, 
+           json_build_object('question', p.question, 'status', p.status, 'correct_option', p.correct_option) as predictions
+    FROM user_predictions up
+    JOIN predictions p ON p.id = up.prediction_id
+    WHERE up.user_id = ${context.userId}
+    ORDER BY up.created_at DESC
+    LIMIT 10
+  `;
 
   if (!userPredictions || userPredictions.length === 0) {
     return {
@@ -266,12 +254,12 @@ async function getPredictionResults(
   context: CommandContext
 ): Promise<CommandResult> {
   if (!predictionId) {
-    const { data: resolved } = await supabase
-      .from('predictions')
-      .select('*')
-      .eq('status', 'resolved')
-      .order('resolved_at', { ascending: false })
-      .limit(5);
+    const resolved = await prisma.$queryRaw<any[]>`
+      SELECT * FROM predictions 
+      WHERE status = 'resolved' 
+      ORDER BY resolved_at DESC 
+      LIMIT 5
+    `;
 
     if (!resolved || resolved.length === 0) {
       return {
@@ -291,11 +279,12 @@ async function getPredictionResults(
     };
   }
 
-  const { data: prediction } = await supabase
-    .from('predictions')
-    .select('*')
-    .ilike('id', `${predictionId}%`)
-    .single();
+  const predictions = await prisma.$queryRaw<any[]>`
+    SELECT * FROM predictions 
+    WHERE id ILIKE ${predictionId + '%'} 
+    LIMIT 1
+  `;
+  const prediction = predictions[0];
 
   if (!prediction) {
     return {

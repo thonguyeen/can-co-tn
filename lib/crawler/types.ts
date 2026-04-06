@@ -10,17 +10,21 @@ export interface NewsSource {
   last_crawled_at: string | null
 }
 
+// Matches real raw_news DB schema:
+// id, source_id, title, content, summary, original_url, image_url, author, published_at, is_processed, post_id, content_hash, crawl_metadata, created_at
 export interface RawArticle {
   source_id: string
+  title: string
+  content: string | null
+  summary: string | null
   original_url: string
-  original_title: string
-  original_content: string | null
-  original_published_at: string | null
+  image_url: string | null
+  author: string | null
+  published_at: string | null
   content_hash: string
   crawl_metadata: {
-    author?: string
-    image_url?: string
     tags?: string[]
+    [key: string]: unknown
   }
 }
 

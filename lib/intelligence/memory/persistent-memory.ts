@@ -5,13 +5,8 @@
 // Long-term memory for user context and preferences
 //
 
-import { createClient } from '@supabase/supabase-js';
+import { prisma } from '@/lib/db';
 import Anthropic from '@anthropic-ai/sdk';
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
 
 const anthropic = new Anthropic();
 
@@ -90,50 +85,37 @@ export async function storeMemory(
     memory.expiresAt = new Date(now.getTime() + options.expiresIn * 60 * 60 * 1000).toISOString();
   }
 
-  const { data, error } = await supabase
-    .from('user_memories')
-    .insert({
-      user_id: memory.userId,
-      type: memory.type,
-      content: memory.content,
-      metadata: memory.metadata,
-      importance: memory.importance,
-      confidence: memory.confidence,
-      source: memory.source,
-      created_at: memory.createdAt,
-      last_accessed_at: memory.lastAccessedAt,
-      access_count: memory.accessCount,
-      expires_at: memory.expiresAt,
-    })
-    .select()
-    .single();
+  const result = await prisma.$queryRaw<any[]>`
+    INSERT INTO user_memories (user_id, type, content, metadata, importance, confidence, source, created_at, last_accessed_at, access_count, expires_at)
+    VALUES (${memory.userId}, ${memory.type}, ${memory.content}, ${JSON.stringify(memory.metadata)}::jsonb, ${memory.importance}, ${memory.confidence}, ${memory.source}, ${memory.createdAt}::timestamptz, ${memory.lastAccessedAt}::timestamptz, ${memory.accessCount}, ${memory.expiresAt ? new Date(memory.expiresAt) : null})
+    RETURNING *
+  `;
 
-  if (error) throw error;
-
-  return mapToMemory(data);
+  return mapToMemory(result[0]);
 }
 
 export async function queryMemories(query: MemoryQuery): Promise<Memory[]> {
-  let dbQuery = supabase
-    .from('user_memories')
-    .select('*')
-    .eq('user_id', query.userId)
-    .order('importance', { ascending: false })
-    .order('last_accessed_at', { ascending: false });
-
+  let sql = 'SELECT * FROM user_memories WHERE user_id = $1';
+  const params: any[] = [query.userId];
+  
   if (query.types && query.types.length > 0) {
-    dbQuery = dbQuery.in('type', query.types);
+    const typesStr = query.types.map(t => `'${t}'`).join(',');
+    sql += ` AND type IN (${typesStr})`;
   }
 
   if (query.minImportance) {
-    dbQuery = dbQuery.gte('importance', query.minImportance);
+    sql += ` AND importance >= ${query.minImportance}`;
   }
+
+  sql += ' ORDER BY importance DESC, last_accessed_at DESC';
 
   if (query.limit) {
-    dbQuery = dbQuery.limit(query.limit);
+    sql += ` LIMIT ${query.limit}`;
   }
 
-  const { data } = await dbQuery;
+  let data = await prisma.$queryRawUnsafe<any[]>(sql, ...params);
+
+  data = data.map(m => ({ ...m, created_at: m.created_at?.toISOString(), last_accessed_at: m.last_accessed_at?.toISOString(), expires_at: m.expires_at?.toISOString() }));
 
   let memories = (data || []).filter(m => {
     // Filter expired
@@ -154,12 +136,8 @@ export async function queryMemories(query: MemoryQuery): Promise<Memory[]> {
   // Update access stats
   if (memories.length > 0) {
     const ids = memories.map(m => m.id);
-    await supabase
-      .from('user_memories')
-      .update({
-        last_accessed_at: new Date().toISOString(),
-      })
-      .in('id', ids);
+    const inIds = ids.map(id => `'${id}'`).join(',');
+    await prisma.$executeRawUnsafe(`UPDATE user_memories SET last_accessed_at = NOW() WHERE id IN (${inIds})`);
   }
 
   return memories.map(mapToMemory);
@@ -171,10 +149,8 @@ export async function getRelevantMemories(
   limit: number = 10
 ): Promise<Memory[]> {
   // Get all memories for user
-  const { data: allMemories } = await supabase
-    .from('user_memories')
-    .select('*')
-    .eq('user_id', userId);
+  let allMemories = await prisma.$queryRaw<any[]>`SELECT * FROM user_memories WHERE user_id = ${userId}`;
+  allMemories = allMemories.map(m => ({ ...m, created_at: m.created_at?.toISOString(), last_accessed_at: m.last_accessed_at?.toISOString(), expires_at: m.expires_at?.toISOString() }));
 
   if (!allMemories || allMemories.length === 0) {
     return [];
@@ -309,10 +285,8 @@ JSON:`,
 // ═══════════════════════════════════════════════════════════════
 
 async function findSimilarMemory(userId: string, content: string): Promise<Memory | null> {
-  const { data } = await supabase
-    .from('user_memories')
-    .select('*')
-    .eq('user_id', userId);
+  let data = await prisma.$queryRaw<any[]>`SELECT * FROM user_memories WHERE user_id = ${userId}`;
+  data = data.map(m => ({ ...m, created_at: m.created_at?.toISOString(), last_accessed_at: m.last_accessed_at?.toISOString(), expires_at: m.expires_at?.toISOString() }));
 
   if (!data || data.length === 0) return null;
 
@@ -328,26 +302,25 @@ async function findSimilarMemory(userId: string, content: string): Promise<Memor
 }
 
 async function reinforceMemory(memoryId: string): Promise<Memory> {
-  const { data: current } = await supabase
-    .from('user_memories')
-    .select('*')
-    .eq('id', memoryId)
-    .single();
+  const data = await prisma.$queryRaw<any[]>`SELECT * FROM user_memories WHERE id = ${memoryId}::uuid LIMIT 1`;
+  const current = data[0];
 
   if (!current) throw new Error('Memory not found');
 
-  const { data } = await supabase
-    .from('user_memories')
-    .update({
-      access_count: current.access_count + 1,
-      confidence: Math.min(1.0, current.confidence + 0.05),
-      last_accessed_at: new Date().toISOString(),
-    })
-    .eq('id', memoryId)
-    .select()
-    .single();
+  const result = await prisma.$queryRaw<any[]>`
+    UPDATE user_memories 
+    SET access_count = access_count + 1,
+        confidence = LEAST(1.0, confidence + 0.05),
+        last_accessed_at = NOW()
+    WHERE id = ${memoryId}::uuid
+    RETURNING *
+  `;
+  const updated = result[0];
+  updated.created_at = updated.created_at?.toISOString();
+  updated.last_accessed_at = updated.last_accessed_at?.toISOString();
+  updated.expires_at = updated.expires_at?.toISOString();
 
-  return mapToMemory(data);
+  return mapToMemory(updated);
 }
 
 function calculateImportance(type: MemoryType, content: string): number {
@@ -403,11 +376,11 @@ function mapToMemory(data: Record<string, unknown>): Memory {
 // ═══════════════════════════════════════════════════════════════
 
 export async function deleteMemory(memoryId: string): Promise<void> {
-  await supabase.from('user_memories').delete().eq('id', memoryId);
+  await prisma.$executeRaw`DELETE FROM user_memories WHERE id = ${memoryId}::uuid`;
 }
 
 export async function deleteAllUserMemories(userId: string): Promise<void> {
-  await supabase.from('user_memories').delete().eq('user_id', userId);
+  await prisma.$executeRaw`DELETE FROM user_memories WHERE user_id = ${userId}`;
 }
 
 export async function getUserMemorySummary(userId: string): Promise<{
@@ -416,12 +389,13 @@ export async function getUserMemorySummary(userId: string): Promise<{
   oldestMemory: string | null;
   newestMemory: string | null;
 }> {
-  const { data, count } = await supabase
-    .from('user_memories')
-    .select('type, created_at', { count: 'exact' })
-    .eq('user_id', userId)
-    .order('created_at', { ascending: true });
+  const data = await prisma.$queryRaw<any[]>`
+    SELECT type, created_at FROM user_memories 
+    WHERE user_id = ${userId} 
+    ORDER BY created_at ASC
+  `;
 
+  const count = data.length;
   const byType: Record<string, number> = {};
   (data || []).forEach(m => {
     byType[m.type] = (byType[m.type] || 0) + 1;
@@ -430,7 +404,7 @@ export async function getUserMemorySummary(userId: string): Promise<{
   return {
     totalMemories: count || 0,
     byType: byType as Record<MemoryType, number>,
-    oldestMemory: data?.[0]?.created_at || null,
-    newestMemory: data?.[data.length - 1]?.created_at || null,
+    oldestMemory: data?.[0]?.created_at?.toISOString() || null,
+    newestMemory: data?.[data.length - 1]?.created_at?.toISOString() || null,
   };
 }

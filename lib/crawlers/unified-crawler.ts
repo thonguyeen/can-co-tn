@@ -14,6 +14,7 @@ import { crawlRedditSource } from './reddit-crawler'
 import { crawlYouTubeSource } from './youtube-crawler'
 import { crawlTelegramSource } from './telegram-crawler'
 import { crawlRSSSource } from './rss-crawler'
+import { prisma } from '@/lib/db'
 
 export interface CrawlResult {
   sourceId: string
@@ -99,7 +100,6 @@ async function crawlSource(source: SourceConfig): Promise<CrawlResult> {
       }
     }
 
-    // Save to database if Supabase is configured
     const savedCount = await saveToDatabase(items)
 
     return {
@@ -151,50 +151,45 @@ async function getCrawlerForPlatform(source: SourceConfig): Promise<NormalizedCo
 // ═══════════════════════════════════════════════════════════════
 
 async function saveToDatabase(items: NormalizedContent[]): Promise<number> {
-  // Only save if Supabase is configured
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-  if (!supabaseUrl || !supabaseKey) {
-    console.log(`Skipping DB save (no Supabase config), ${items.length} items crawled`)
-    return 0
-  }
-
-  const { createClient } = await import('@supabase/supabase-js')
-  const supabase = createClient(supabaseUrl, supabaseKey)
-
   let savedCount = 0
 
   for (const item of items) {
     try {
       // Check for duplicates by content hash or URL
-      const { data: existing } = await supabase
-        .from('raw_news')
-        .select('id')
-        .or(`original_url.eq.${item.original_url},content_hash.eq.${item.content_hash}`)
-        .limit(1)
+      const existing = await prisma.rawNews.findFirst({
+        where: {
+          OR: [
+            { originalUrl: item.original_url },
+            { contentHash: item.content_hash }
+          ]
+        },
+        select: { id: true }
+      })
 
-      if (existing && existing.length > 0) {
+      if (existing) {
         continue // Skip duplicate
       }
 
-      const { error } = await supabase.from('raw_news').insert({
-        original_url: item.original_url,
-        original_title: item.original_title,
-        original_content: item.original_content,
-        published_at: item.published_at,
-        content_hash: item.content_hash,
-        sources: {
-          id: item.source_id,
-          name: item.source_name,
-          platform: item.source_platform,
-          category: item.source_categories,
-          credibility: item.source_credibility,
-          platform_data: item.platform_data,
-        },
-        status: 'pending',
+      const newRecord = await prisma.rawNews.create({
+        data: {
+          originalUrl: item.original_url,
+          title: item.original_title, 
+          content: item.original_content,
+          publishedAt: item.published_at ? new Date(item.published_at) : null,
+          contentHash: item.content_hash,
+          crawlMetadata: {
+            id: item.source_id,
+            name: item.source_name,
+            platform: item.source_platform,
+            category: item.source_categories,
+            credibility: item.source_credibility,
+            platform_data: item.platform_data,
+          } as any,
+          isProcessed: false,
+        }
       })
 
-      if (!error) {
+      if (newRecord) {
         savedCount++
       }
     } catch (error) {

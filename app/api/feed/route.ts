@@ -5,7 +5,8 @@ import {
   getFollowingFeed,
   getTrendingPosts,
 } from '@/lib/feed/feed-service'
-import { createClient } from '@/lib/supabase/server'
+import { getAuthUserId } from '@/lib/data/get-user'
+import { prisma } from '@/lib/db'
 
 export async function GET(req: NextRequest) {
   try {
@@ -23,11 +24,7 @@ export async function GET(req: NextRequest) {
       | 'all'
 
     // Get current user for personalization
-    const supabase = await createClient()
-    const {
-      data: { user },
-    } = await supabase.auth.getUser()
-    const userId = user?.id
+    const userId = await getAuthUserId(req)
 
     let result
 
@@ -74,7 +71,7 @@ export async function GET(req: NextRequest) {
 
       default:
         result = await getFeed({
-          userId,
+          userId: userId || undefined,
           cursor,
           limit,
           botHandle,
@@ -90,21 +87,19 @@ export async function GET(req: NextRequest) {
     if (userId && result.posts.length > 0) {
       const postIds = result.posts.map((p: { id: string }) => p.id)
 
-      const [likesRes, savesRes] = await Promise.all([
-        supabase
-          .from('likes')
-          .select('post_id')
-          .eq('user_id', userId)
-          .in('post_id', postIds),
-        supabase
-          .from('saves')
-          .select('post_id')
-          .eq('user_id', userId)
-          .in('post_id', postIds),
+      const [likes, saves] = await Promise.all([
+        prisma.like.findMany({
+          where: { userId, postId: { in: postIds } },
+          select: { postId: true },
+        }),
+        prisma.save.findMany({
+          where: { userId, postId: { in: postIds } },
+          select: { postId: true },
+        }),
       ])
 
-      likedPostIds = (likesRes.data || []).map((l) => l.post_id)
-      savedPostIds = (savesRes.data || []).map((s) => s.post_id)
+      likedPostIds = likes.map((l) => l.postId)
+      savedPostIds = saves.map((s) => s.postId)
     }
 
     return NextResponse.json({ ...result, likedPostIds, savedPostIds })

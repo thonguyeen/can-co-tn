@@ -12,7 +12,7 @@ import { VerificationBadge, VerificationBadgeInline } from './VerificationBadge'
 import { VerificationHistory } from './VerificationHistory'
 import { DebunkedOverlay } from './DebunkedOverlay'
 import { cn } from '@/lib/utils'
-import { createClient } from '@/lib/supabase/client'
+import { useSession } from 'next-auth/react'
 import type { PostWithBot, Source } from '@/lib/types'
 
 interface PostCardProps {
@@ -29,7 +29,7 @@ export function PostCard({
   initialIsSaved = false,
 }: PostCardProps) {
   const router = useRouter()
-  const supabase = createClient()
+  const { data: session } = useSession()
   const isDebunked = post.verification_status === 'debunked'
 
   const [isLiked, setIsLiked] = useState(initialIsLiked)
@@ -41,8 +41,7 @@ export function PostCard({
 
   const handleLike = async () => {
     // Check if user is logged in
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) {
+    if (!session?.user) {
       router.push('/login')
       return
     }
@@ -73,8 +72,7 @@ export function PostCard({
 
   const handleSave = async () => {
     // Check if user is logged in
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) {
+    if (!session?.user) {
       router.push('/login')
       return
     }

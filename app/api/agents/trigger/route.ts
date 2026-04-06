@@ -1,12 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { prisma } from '@/lib/db';
 import { orchestrate, executeActions } from '@/lib/agents/orchestrator';
 import type { Intent } from '@/lib/engine/types';
 
 // POST /api/agents/trigger — run orchestrator for an event
 export async function POST(request: NextRequest) {
   try {
-    const supabase = await createClient();
     const body = await request.json();
     const { event, intent_id, context } = body;
 
@@ -16,17 +15,21 @@ export async function POST(request: NextRequest) {
 
     let intentData: Intent | undefined;
     if (intent_id) {
-      const { data } = await supabase.from('intents').select('*').eq('id', intent_id).single();
-      if (data) intentData = data as Intent;
+      const data = await prisma.intent.findUnique({
+        where: { id: intent_id },
+      });
+      if (data) intentData = data as unknown as Intent;
     }
 
-    const actions = await orchestrate(
-      { event, intentId: intent_id, intentData, context },
-      supabase,
-    );
+    const actions = await orchestrate({
+      event,
+      intentId: intent_id,
+      intentData,
+      context,
+    });
 
     if (actions.length > 0) {
-      await executeActions(actions, supabase);
+      await executeActions(actions);
     }
 
     return NextResponse.json({

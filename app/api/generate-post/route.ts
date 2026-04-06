@@ -5,14 +5,8 @@ import {
   generatePendingPosts,
 } from '@/lib/ai/agents/post-generator'
 import { detectBreakingNews, getExpiryTime } from '@/lib/ai/agents/breaking-detector'
-import { createClient } from '@supabase/supabase-js'
-
-function getSupabaseAdmin() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
-}
+import { prisma } from '@/lib/db'
+import { toSnakeCase } from '@/lib/data/helpers'
 
 export async function POST(req: NextRequest) {
   try {
@@ -84,38 +78,39 @@ export async function GET(req: NextRequest) {
   }
 
   // Get generation stats
-  const supabase = getSupabaseAdmin()
+  const bots = await prisma.bot.findMany({
+    select: {
+      id: true,
+      name: true,
+      handle: true,
+      postsCount: true,
+      avatarUrl: true,
+      colorAccent: true,
+    },
+  })
 
-  // Posts per bot
-  const { data: bots } = await supabase
-    .from('bots')
-    .select('id, name, handle, posts_count, avatar_url, color_accent')
+  const recentPosts = await prisma.post.findMany({
+    select: {
+      id: true,
+      content: true,
+      createdAt: true,
+      verificationStatus: true,
+      bot: {
+        select: { name: true, handle: true, avatarUrl: true },
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 10,
+  })
 
-  // Recent posts
-  const { data: recentPosts } = await supabase
-    .from('posts')
-    .select(
-      `
-      id,
-      content,
-      created_at,
-      verification_status,
-      bot:bots (name, handle, avatar_url)
-    `
-    )
-    .order('created_at', { ascending: false })
-    .limit(10)
-
-  // Pending raw news (not yet posts)
-  const { count: pendingCount } = await supabase
-    .from('raw_news')
-    .select('*', { count: 'exact', head: true })
-    .eq('is_processed', false)
+  const pendingCount = await prisma.rawNews.count({
+    where: { isProcessed: false },
+  })
 
   return NextResponse.json({
-    bots,
-    recent_posts: recentPosts,
-    pending_news: pendingCount || 0,
+    bots: toSnakeCase(bots),
+    recent_posts: toSnakeCase(recentPosts),
+    pending_news: pendingCount,
   })
 }
 
@@ -135,37 +130,30 @@ async function checkAndSaveBreaking(
       return { isBreaking: false }
     }
 
-    const supabase = getSupabaseAdmin()
     const expiresAt = getExpiryTime(detection.urgencyLevel, detection.expiresInMinutes)
 
     // Mark post as breaking
-    await supabase
-      .from('posts')
-      .update({
-        is_breaking: true,
-        breaking_detected_at: new Date().toISOString(),
-      })
-      .eq('id', postId)
+    await prisma.post.update({
+      where: { id: postId },
+      data: { isBreaking: true },
+    })
 
     // Insert breaking news record
-    const { data, error } = await supabase
-      .from('breaking_news')
-      .insert({
-        post_id: postId,
+    // Note: relatedTopics column not in current schema — omitted
+    const breakingNews = await prisma.breakingNews.create({
+      data: {
+        postId,
         headline: detection.headline,
         summary: detection.summary,
-        urgency_level: detection.urgencyLevel,
+        urgencyLevel: detection.urgencyLevel,
         category: detection.category,
-        related_topics: detection.relatedTopics,
-        is_active: true,
-        expires_at: expiresAt.toISOString(),
-      })
-      .select('id')
-      .single()
+        isActive: true,
+        expiresAt,
+      },
+      select: { id: true },
+    })
 
-    if (error) throw error
-
-    return { isBreaking: true, id: data.id }
+    return { isBreaking: true, id: breakingNews.id }
   } catch (error) {
     console.error('Breaking detection save error:', error)
     return null

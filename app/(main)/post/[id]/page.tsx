@@ -1,7 +1,10 @@
 import { notFound } from 'next/navigation'
 import Link from 'next/link'
 import { ArrowLeft } from 'lucide-react'
-import { createClient } from '@/lib/supabase/server'
+import { prisma } from '@/lib/db'
+import { getServerSession } from 'next-auth'
+import { authOptions } from '@/lib/auth'
+import { toSnakeCase } from '@/lib/data/helpers'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { PostCard } from '@/components/feed/PostCard'
@@ -16,52 +19,56 @@ interface PostDetailPageProps {
 
 export default async function PostDetailPage({ params }: PostDetailPageProps) {
   const { id } = await params
-  const supabase = await createClient()
 
-  // Get current user
-  const { data: { user } } = await supabase.auth.getUser()
+  // Get current user from NextAuth session
+  const session = await getServerSession(authOptions)
+  const userId = (session?.user as { id?: string } | undefined)?.id
 
   // Get post with bot
-  const { data: post, error } = await supabase
-    .from('posts')
-    .select(`
-      *,
-      bot:bots (*)
-    `)
-    .eq('id', id)
-    .single()
+  const post = await prisma.post.findUnique({
+    where: { id },
+    include: {
+      bot: true,
+    },
+  })
 
-  if (error || !post) {
+  if (!post) {
     notFound()
   }
 
   // Get verification history
-  const { data: updates } = await supabase
-    .from('post_updates')
-    .select('*')
-    .eq('post_id', id)
-    .order('created_at', { ascending: false })
+  const updates = await prisma.postUpdate.findMany({
+    where: { postId: id },
+    orderBy: { createdAt: 'desc' },
+  })
 
   // Check if user has liked/saved this post
   let isLiked = false
   let isSaved = false
 
-  if (user) {
+  if (userId) {
     const [likeResult, saveResult] = await Promise.all([
-      supabase.from('likes').select('*').eq('user_id', user.id).eq('post_id', id).single(),
-      supabase.from('saves').select('*').eq('user_id', user.id).eq('post_id', id).single(),
+      prisma.like.findUnique({
+        where: { userId_postId: { userId, postId: id } },
+      }),
+      prisma.save.findUnique({
+        where: { userId_postId: { userId, postId: id } },
+      }),
     ])
-    isLiked = !!likeResult.data
-    isSaved = !!saveResult.data
+    isLiked = !!likeResult
+    isSaved = !!saveResult
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const postData = post as any
+  // Convert to snake_case for frontend compatibility
+  const postSnake = toSnakeCase(post)
   const postWithBot = {
-    ...postData,
-    sources: postData.sources || [],
-    bot: postData.bot,
+    ...postSnake,
+    sources: postSnake.sources || [],
+    bot: postSnake.bot,
   } as PostWithBot
+
+  // Convert updates to snake_case
+  const updatesSnake = updates.map((u) => toSnakeCase(u)) as PostUpdate[]
 
   return (
     <div className="pb-8">
@@ -84,14 +91,14 @@ export default async function PostDetailPage({ params }: PostDetailPageProps) {
       />
 
       {/* Verification History */}
-      {updates && updates.length > 0 && (
+      {updatesSnake && updatesSnake.length > 0 && (
         <Card className="mt-4">
           <CardHeader>
             <CardTitle className="text-base">Lịch sử xác minh</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="space-y-4">
-              {updates.map((update: PostUpdate) => {
+              {updatesSnake.map((update: PostUpdate) => {
                 const config = VERIFICATION_CONFIG[update.new_status]
                 return (
                   <div
@@ -142,7 +149,7 @@ export default async function PostDetailPage({ params }: PostDetailPageProps) {
       <Card className="mt-4">
         <CardHeader>
           <CardTitle className="text-base">
-            Bình luận ({postData.comments_count})
+            Bình luận ({postSnake.comments_count})
           </CardTitle>
         </CardHeader>
         <CardContent>

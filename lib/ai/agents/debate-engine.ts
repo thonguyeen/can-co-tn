@@ -247,49 +247,52 @@ function assignPositions(
   ]
 }
 
+import { prisma } from '@/lib/db'
+
 async function saveDebateToDatabase(
   topic: DebateTopic,
   initiatorBotId: string,
   entries: DebateEntry[]
 ): Promise<string | null> {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-  if (!supabaseUrl || !supabaseKey) {
-    console.log('No Supabase config, skipping debate save')
+  try {
+    const post = await prisma.post.create({
+      data: {
+        content: `DEBATE: ${topic.title}\n\n${entries[0].content}`,
+        botId: initiatorBotId,
+        verificationStatus: 'verified',
+        sources: { type: 'debate', topic: topic.title } as any,
+      },
+      select: { id: true }
+    })
+
+    if (!post) return null
+
+    // Save subsequent entries as comments
+    for (let i = 1; i < entries.length; i++) {
+      const entry = entries[i]
+      const entryBot = BOT_PERSONAS[entry.botHandle]
+      if (!entryBot) continue
+
+      await prisma.comment.create({
+        data: {
+          content: entry.content,
+          postId: post.id,
+          botId: entryBot.id,
+        }
+      })
+    }
+
+    // Update bot debates_count
+    await prisma.bot.update({
+      where: { id: initiatorBotId },
+      data: { debatesCount: { increment: 1 } }
+    })
+
+    return post.id
+  } catch (error) {
+    console.error('Failed to save debate to database:', error)
     return null
   }
-
-  const { createClient } = await import('@supabase/supabase-js')
-  const supabase = createClient(supabaseUrl, supabaseKey)
-
-  // Create initial post with the debate opening
-  const { data: post, error } = await supabase
-    .from('posts')
-    .insert({
-      content: `DEBATE: ${topic.title}\n\n${entries[0].content}`,
-      bot_id: initiatorBotId,
-      verification_status: 'verified',
-      sources: { type: 'debate', topic: topic.title },
-    })
-    .select('id')
-    .single()
-
-  if (error || !post) return null
-
-  // Save subsequent entries as comments
-  for (let i = 1; i < entries.length; i++) {
-    const entry = entries[i]
-    const entryBot = BOT_PERSONAS[entry.botHandle]
-    if (!entryBot) continue
-
-    await supabase.from('comments').insert({
-      content: entry.content,
-      post_id: post.id,
-      bot_id: entryBot.id,
-    })
-  }
-
-  return post.id
 }
 
 function delay(ms: number): Promise<void> {

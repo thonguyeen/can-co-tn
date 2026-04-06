@@ -1,30 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createServerClient } from '@supabase/ssr'
-import { cookies } from 'next/headers'
-
-async function getSupabase() {
-  const cookieStore = await cookies()
-  return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return cookieStore.getAll()
-        },
-        setAll(cookiesToSet) {
-          try {
-            cookiesToSet.forEach(({ name, value, options }) =>
-              cookieStore.set(name, value, options)
-            )
-          } catch {
-            // Ignore
-          }
-        },
-      },
-    }
-  )
-}
+import { prisma } from '@/lib/db'
+import { requireAuth } from '@/lib/data/get-user'
+import { toSnakeCase } from '@/lib/data/helpers'
 
 // GET /api/comments/[id] - Get a single comment
 export async function GET(
@@ -32,39 +9,39 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params
-  const supabase = await getSupabase()
 
-  const { data: comment, error } = await supabase
-    .from('comments')
-    .select(
-      `
-      id,
-      content,
-      parent_id,
-      post_id,
-      created_at,
-      user_id,
-      bot_id,
-      profiles:user_id (
-        display_name,
-        avatar_url
-      ),
-      bots:bot_id (
-        name,
-        handle,
-        avatar_url,
-        color_accent
-      )
-    `
-    )
-    .eq('id', id)
-    .single()
+  const comment = await prisma.comment.findUnique({
+    where: { id },
+    include: {
+      user: {
+        select: {
+          displayName: true,
+          avatarUrl: true,
+        },
+      },
+      bot: {
+        select: {
+          name: true,
+          handle: true,
+          avatarUrl: true,
+          colorAccent: true,
+        },
+      },
+    },
+  })
 
-  if (error) {
+  if (!comment) {
     return NextResponse.json({ error: 'Comment not found' }, { status: 404 })
   }
 
-  return NextResponse.json({ comment })
+  // Convert to snake_case and rename relation keys
+  const commentSnake = toSnakeCase(comment)
+  commentSnake.profiles = commentSnake.user
+  commentSnake.bots = commentSnake.bot
+  delete commentSnake.user
+  delete commentSnake.bot
+
+  return NextResponse.json({ comment: commentSnake })
 }
 
 // DELETE /api/comments/[id] - Delete a comment
@@ -73,44 +50,35 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params
-  const supabase = await getSupabase()
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-
-  if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
+  const auth = await requireAuth(request)
+  if ('error' in auth) return auth.error
+  const { userId } = auth
 
   // Get comment first to check ownership and get post_id
-  const { data: comment, error: fetchError } = await supabase
-    .from('comments')
-    .select('id, user_id, post_id')
-    .eq('id', id)
-    .single()
+  const comment = await prisma.comment.findUnique({
+    where: { id },
+    select: { id: true, userId: true, postId: true },
+  })
 
-  if (fetchError || !comment) {
+  if (!comment) {
     return NextResponse.json({ error: 'Comment not found' }, { status: 404 })
   }
 
   // Only allow user to delete their own comments
-  if (comment.user_id !== user.id) {
+  if (comment.userId !== userId) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
   // Delete comment
-  const { error: deleteError } = await supabase
-    .from('comments')
-    .delete()
-    .eq('id', id)
-
-  if (deleteError) {
-    return NextResponse.json({ error: deleteError.message }, { status: 500 })
-  }
+  await prisma.comment.delete({
+    where: { id },
+  })
 
   // Decrement comment count
-  await supabase.rpc('decrement_comments', { p_post_id: comment.post_id })
+  await prisma.post.update({
+    where: { id: comment.postId },
+    data: { commentsCount: { decrement: 1 } },
+  })
 
   return NextResponse.json({ success: true })
 }

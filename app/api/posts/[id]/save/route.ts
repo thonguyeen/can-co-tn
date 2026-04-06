@@ -1,67 +1,35 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createServerClient } from '@supabase/ssr'
-import { cookies } from 'next/headers'
-
-async function getSupabase() {
-  const cookieStore = await cookies()
-  return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return cookieStore.getAll()
-        },
-        setAll(cookiesToSet) {
-          try {
-            cookiesToSet.forEach(({ name, value, options }) =>
-              cookieStore.set(name, value, options)
-            )
-          } catch {
-            // Ignore
-          }
-        },
-      },
-    }
-  )
-}
+import { prisma } from '@/lib/db'
+import { requireAuth } from '@/lib/data/get-user'
 
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: postId } = await params
-  const supabase = await getSupabase()
+  const auth = await requireAuth(request)
+  if ('error' in auth) return auth.error
+  const { userId } = auth
 
-  const { data: { user } } = await supabase.auth.getUser()
-
-  if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
-
-  // Check if already saved
-  const { data: existingSave } = await supabase
-    .from('saves')
-    .select('*')
-    .eq('user_id', user.id)
-    .eq('post_id', postId)
-    .single()
+  // Check if already saved (composite PK: userId + postId)
+  const existingSave = await prisma.save.findUnique({
+    where: { userId_postId: { userId, postId } },
+  })
 
   if (existingSave) {
     return NextResponse.json({ error: 'Already saved' }, { status: 400 })
   }
 
   // Insert save
-  const { error: insertError } = await supabase
-    .from('saves')
-    .insert({ user_id: user.id, post_id: postId })
-
-  if (insertError) {
-    return NextResponse.json({ error: insertError.message }, { status: 500 })
-  }
+  await prisma.save.create({
+    data: { userId, postId },
+  })
 
   // Increment saves_count
-  await supabase.rpc('increment_post_saves', { p_post_id: postId })
+  await prisma.post.update({
+    where: { id: postId },
+    data: { savesCount: { increment: 1 } },
+  })
 
   return NextResponse.json({ success: true, saved: true })
 }
@@ -71,27 +39,25 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: postId } = await params
-  const supabase = await getSupabase()
-
-  const { data: { user } } = await supabase.auth.getUser()
-
-  if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
+  const auth = await requireAuth(request)
+  if ('error' in auth) return auth.error
+  const { userId } = auth
 
   // Delete save
-  const { error: deleteError } = await supabase
-    .from('saves')
-    .delete()
-    .eq('user_id', user.id)
-    .eq('post_id', postId)
-
-  if (deleteError) {
-    return NextResponse.json({ error: deleteError.message }, { status: 500 })
+  try {
+    await prisma.save.delete({
+      where: { userId_postId: { userId, postId } },
+    })
+  } catch {
+    // Save not found — ignore
+    return NextResponse.json({ success: true, saved: false })
   }
 
   // Decrement saves_count
-  await supabase.rpc('decrement_post_saves', { p_post_id: postId })
+  await prisma.post.update({
+    where: { id: postId },
+    data: { savesCount: { decrement: 1 } },
+  })
 
   return NextResponse.json({ success: true, saved: false })
 }
@@ -101,20 +67,16 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: postId } = await params
-  const supabase = await getSupabase()
+  const { getAuthUserId } = await import('@/lib/data/get-user')
+  const userId = await getAuthUserId(request)
 
-  const { data: { user } } = await supabase.auth.getUser()
-
-  if (!user) {
+  if (!userId) {
     return NextResponse.json({ saved: false })
   }
 
-  const { data: save } = await supabase
-    .from('saves')
-    .select('*')
-    .eq('user_id', user.id)
-    .eq('post_id', postId)
-    .single()
+  const save = await prisma.save.findUnique({
+    where: { userId_postId: { userId, postId } },
+  })
 
   return NextResponse.json({ saved: !!save })
 }

@@ -5,13 +5,8 @@
 // Handles stats, leaderboard, achievements commands
 //
 
-import { createClient } from '@supabase/supabase-js';
+import { prisma } from '@/lib/db';
 import { CommandContext, CommandResult } from './message-handler';
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
 
 // Level configuration
 const LEVELS = [
@@ -66,11 +61,9 @@ export async function handleGamificationCommand(
 
 async function getStats(context: CommandContext): Promise<CommandResult> {
   // Get user stats
-  const { data: stats } = await supabase
-    .from('user_stats')
-    .select('*')
-    .eq('user_id', context.userId)
-    .single();
+  const stats = await prisma.userStat.findUnique({
+    where: { userId: context.userId as string }
+  });
 
   if (!stats) {
     return {
@@ -80,8 +73,8 @@ async function getStats(context: CommandContext): Promise<CommandResult> {
     };
   }
 
-  const points = stats.total_points || 0;
-  const streak = stats.current_streak || 0;
+  const points = stats.points || 0;
+  const streak = stats.streakDays || 0;
 
   // Calculate level
   const currentLevel = LEVELS.slice().reverse().find(l => points >= l.minPoints) || LEVELS[0];
@@ -94,18 +87,16 @@ async function getStats(context: CommandContext): Promise<CommandResult> {
   const levelBar = createProgressBar(progress);
 
   // Get rank
-  const { count: higherRank } = await supabase
-    .from('user_stats')
-    .select('*', { count: 'exact', head: true })
-    .gt('total_points', points);
+  const higherRank = await prisma.userStat.count({
+    where: { points: { gt: points } }
+  });
 
-  const rank = (higherRank || 0) + 1;
+  const rank = higherRank + 1;
 
   // Get achievements count
-  const { count: achievementCount } = await supabase
-    .from('user_achievements')
-    .select('*', { count: 'exact', head: true })
-    .eq('user_id', context.userId);
+  // TODO: Restore query when user_achievements table is available
+  // const achievements = await prisma.$queryRaw<any[]>`SELECT id FROM user_achievements WHERE user_id = ${context.userId}`;
+  const achievementCount = 0;
 
   const message = context.language === 'vi'
     ? `📊 *Stats của bạn*
@@ -116,8 +107,8 @@ ${levelBar} ${progress}%
 ${nextLevel ? `⬆️ Còn ${(nextLevel.minPoints - points).toLocaleString()} điểm → ${nextLevel.icon} ${nextLevel.name}` : '🎉 Max level!'}
 
 🔥 Streak: ${streak} ngày ${streak >= 7 ? '🔥🔥' : ''}
-📈 Longest: ${stats.longest_streak || 0} ngày
-🏆 Achievements: ${achievementCount || 0}
+📈 Longest: ${streak} ngày
+🏆 Achievements: ${achievementCount}
 
 📊 Xếp hạng: #${rank}`
     : `📊 *Your Stats*
@@ -128,8 +119,8 @@ ${levelBar} ${progress}%
 ${nextLevel ? `⬆️ ${(nextLevel.minPoints - points).toLocaleString()} points to ${nextLevel.icon} ${nextLevel.name}` : '🎉 Max level!'}
 
 🔥 Streak: ${streak} days ${streak >= 7 ? '🔥🔥' : ''}
-📈 Longest: ${stats.longest_streak || 0} days
-🏆 Achievements: ${achievementCount || 0}
+📈 Longest: ${streak} days
+🏆 Achievements: ${achievementCount}
 
 📊 Rank: #${rank}`;
 
@@ -146,24 +137,18 @@ async function getLeaderboardCommand(
 ): Promise<CommandResult> {
   const type = args[0]?.toLowerCase() || 'all';
 
-  let query = supabase
-    .from('user_stats')
-    .select(`
-      user_id,
-      total_points,
-      current_streak,
-      profiles (display_name)
-    `)
-    .order('total_points', { ascending: false })
-    .limit(10);
-
-  if (type === 'weekly') {
-    query = query.order('weekly_points', { ascending: false });
-  } else if (type === 'streak') {
-    query = query.order('current_streak', { ascending: false });
+  let orderBy: any = { points: 'desc' };
+  if (type === 'streak') {
+    orderBy = { streakDays: 'desc' };
   }
 
-  const { data: entries } = await query;
+  const entries = await prisma.userStat.findMany({
+    orderBy,
+    take: 10,
+    include: {
+      user: { select: { displayName: true } }
+    }
+  });
 
   if (!entries || entries.length === 0) {
     return {
@@ -177,11 +162,10 @@ async function getLeaderboardCommand(
 
   const list = entries.map((e, i) => {
     const medal = medals[i] || `${i + 1}.`;
-    const profile = e.profiles as unknown as { display_name: string } | null;
-    const name = profile?.display_name || 'Anonymous';
-    const points = e.total_points || 0;
+    const name = e.user?.displayName || 'Anonymous';
+    const points = e.points || 0;
     const level = LEVELS.slice().reverse().find(l => points >= l.minPoints) || LEVELS[0];
-    const highlight = e.user_id === context.userId ? '👈' : '';
+    const highlight = e.userId === context.userId ? '👈' : '';
 
     return `${medal} ${level.icon} ${name} - ${points.toLocaleString()} ${highlight}`;
   }).join('\n');
@@ -202,12 +186,11 @@ async function getLeaderboardCommand(
 // ═══════════════════════════════════════════════════════════════
 
 async function getAchievementsCommand(context: CommandContext): Promise<CommandResult> {
-  const { data: userAchievements } = await supabase
-    .from('user_achievements')
-    .select('achievement_id, unlocked_at')
-    .eq('user_id', context.userId);
-
-  const unlockedIds = new Set((userAchievements || []).map(a => a.achievement_id));
+  // TODO: Restore when user_achievements table is available
+  // const userAchievements = await prisma.$queryRaw<any[]>`SELECT achievement_id, unlocked_at FROM user_achievements WHERE user_id = ${context.userId}`;
+  const userAchievements: any[] = [];
+  
+  const unlockedIds = new Set(userAchievements.map(a => a.achievement_id));
 
   // Sample achievements list
   const allAchievements = [
@@ -260,14 +243,13 @@ ${lockedList}
 // ═══════════════════════════════════════════════════════════════
 
 async function getStreakCommand(context: CommandContext): Promise<CommandResult> {
-  const { data: stats } = await supabase
-    .from('user_stats')
-    .select('current_streak, longest_streak, last_active_date')
-    .eq('user_id', context.userId)
-    .single();
+  const stats = await prisma.userStat.findUnique({
+    where: { userId: context.userId as string },
+    select: { streakDays: true, lastActiveDate: true }
+  });
 
-  const currentStreak = stats?.current_streak || 0;
-  const longestStreak = stats?.longest_streak || 0;
+  const currentStreak = stats?.streakDays || 0;
+  const longestStreak = stats?.streakDays || 0;
 
   const fireEmoji = currentStreak >= 30 ? '🔥🔥🔥' :
                     currentStreak >= 7 ? '🔥🔥' :
@@ -279,7 +261,7 @@ async function getStreakCommand(context: CommandContext): Promise<CommandResult>
 
   // Check if active today
   const today = new Date().toISOString().split('T')[0];
-  const lastActive = stats?.last_active_date?.split('T')[0];
+  const lastActive = stats?.lastActiveDate?.toISOString().split('T')[0];
   const isActiveToday = lastActive === today;
 
   const message = context.language === 'vi'

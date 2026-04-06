@@ -25,7 +25,10 @@ const PAGE_SIZE = 8;
 
 export default function DemoPage() {
   const [filter, setFilter] = useState<FilterType>('all');
-  const [intents, setIntents] = useState<MockIntent[]>([...GENERATED_INTENTS, ...CRAWLED_INTENTS].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()));
+  const MOCK_INTENTS = [...GENERATED_INTENTS, ...CRAWLED_INTENTS].sort(
+    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+  );
+  const [intents, setIntents] = useState<MockIntent[]>(MOCK_INTENTS);
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const loadMoreRef = useRef<HTMLDivElement>(null);
@@ -56,8 +59,67 @@ export default function DemoPage() {
     setVisibleCount(PAGE_SIZE);
   }, [filter]);
 
+  // Load real intents from DB on mount and put them at the top
+  useEffect(() => {
+    const fetchRealIntents = async () => {
+      try {
+        const res = await fetch('/api/intents?limit=20&status=active');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.intents && data.intents.length > 0) {
+          setIntents((prev) => {
+            const mockIds = new Set(MOCK_INTENTS.map((i) => i.id));
+            const dbIntents = data.intents.filter((i: MockIntent) => !mockIds.has(i.id));
+            if (dbIntents.length === 0) return prev;
+            // DB intents on top, then mock data
+            return [...dbIntents, ...MOCK_INTENTS];
+          });
+        }
+      } catch {
+        // Silently fail — mock data still shows
+      }
+    };
+    fetchRealIntents();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleNewIntent = useCallback((newIntent: MockIntent) => {
     setIntents((prev) => [newIntent, ...prev]);
+  }, []);
+
+  const handleIntentCreated = useCallback(async () => {
+    // Fetch ngay để bài hiện lên trước (chưa có bot comment)
+    const fetchAndMerge = async () => {
+      try {
+        const res = await fetch('/api/intents?limit=5');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.intents && data.intents.length > 0) {
+            setIntents((prev) => {
+              const existingIds = new Set(prev.map((i) => i.id));
+              const newOnes = data.intents.filter((i: MockIntent) => !existingIds.has(i.id));
+              if (newOnes.length === 0) {
+                // Update existing intents with fresh bot_comment data
+                const updatedMap = new Map(data.intents.map((i: MockIntent) => [i.id, i]));
+                return prev.map((i) => {
+                  const fresh = updatedMap.get(i.id) as MockIntent | undefined;
+                  return fresh ? { ...i, ...fresh } : i;
+                });
+              }
+              return [...newOnes, ...prev];
+            });
+          }
+        }
+      } catch {
+        // Fallback: keep existing mock data
+      }
+    };
+
+    // Fetch ngay để bài hiện ra
+    await fetchAndMerge();
+
+    // Fetch lại sau 3 giây — lúc này bot comment đã kịp được ghi vào DB
+    setTimeout(() => { fetchAndMerge(); }, 3000);
   }, []);
 
   return (
@@ -78,7 +140,7 @@ export default function DemoPage() {
       <OnboardingBanner />
 
       <div className="mb-3">
-        <ComposeIntent onSubmit={handleNewIntent} />
+        <ComposeIntent mode="real" onSubmit={handleNewIntent} onIntentCreated={handleIntentCreated} />
       </div>
 
       {/* Stats Bar */}

@@ -3,14 +3,7 @@ import {
   VERIFICATION_SYSTEM_PROMPT,
   CLAIM_EXTRACTION_PROMPT,
 } from '../prompts/verification'
-import { createClient } from '@supabase/supabase-js'
-
-function getSupabaseAdmin() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
-}
+import { prisma } from '@/lib/db'
 
 // Types
 interface RawNews {
@@ -63,21 +56,17 @@ export async function verifyNews(rawNewsId: string): Promise<{
   error?: string
 }> {
   try {
-    const supabase = getSupabaseAdmin()
-
     // 1. Fetch the raw news item
-    const { data: rawNews, error: fetchError } = await supabase
-      .from('raw_news')
-      .select(
-        `
-        *,
-        sources (name, credibility_score, category)
-      `
-      )
-      .eq('id', rawNewsId)
-      .single()
+    const rawNewsData = await prisma.$queryRaw<any[]>`
+      SELECT r.*, row_to_json(s.*) as sources
+      FROM raw_news r
+      LEFT JOIN crawl_sources s ON r.source_id = s.id
+      WHERE r.id = ${rawNewsId}::uuid
+      LIMIT 1
+    `
+    const rawNews = rawNewsData[0]
 
-    if (fetchError || !rawNews) {
+    if (!rawNews) {
       throw new Error(`Raw news not found: ${rawNewsId}`)
     }
 
@@ -95,13 +84,9 @@ export async function verifyNews(rawNewsId: string): Promise<{
     )
 
     // 5. Update raw_news as processed
-    await supabase
-      .from('raw_news')
-      .update({
-        is_processed: true,
-        processed_at: new Date().toISOString(),
-      })
-      .eq('id', rawNewsId)
+    await prisma.$executeRaw`
+      UPDATE raw_news SET is_processed = true, processed_at = NOW() WHERE id = ${rawNewsId}::uuid
+    `
 
     return {
       success: true,
@@ -121,24 +106,15 @@ export async function verifyNews(rawNewsId: string): Promise<{
 // ═══════════════════════════════════════════════════════════════
 
 async function findCrossReferences(mainNews: RawNews): Promise<RawNews[]> {
-  const supabase = getSupabaseAdmin()
-
   // Find similar news from last 48 hours, different sources
-  const { data: candidates } = await supabase
-    .from('raw_news')
-    .select(
-      `
-      *,
-      sources (name, credibility_score, category)
-    `
-    )
-    .neq('id', mainNews.id)
-    .neq('source_id', mainNews.source_id)
-    .gte(
-      'created_at',
-      new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString()
-    )
-    .limit(20)
+  const candidates = await prisma.$queryRaw<any[]>`
+    SELECT r.*, row_to_json(s.*) as sources
+    FROM raw_news r
+    LEFT JOIN crawl_sources s ON r.source_id = s.id
+    WHERE r.id != ${mainNews.id}::uuid AND r.source_id != ${mainNews.source_id}::uuid
+      AND r.created_at >= NOW() - INTERVAL '48 hours'
+    LIMIT 20
+  `
 
   if (!candidates || candidates.length === 0) {
     return []
@@ -193,7 +169,7 @@ TIÊU ĐỀ: ${news.original_title}
 NỘI DUNG:
 ${news.original_content || 'Không có nội dung chi tiết'}
 
-NGUỒN: ${news.sources.name}
+NGUỒN: ${news.sources?.name || 'Unknown'}
 `
 
   try {
@@ -223,13 +199,13 @@ async function runVerification(
   claims: ClaimExtractionResult
 ): Promise<VerificationResult> {
   // Build context for AI
-  const mainSourceCredibility = mainNews.sources.credibility_score
+  const mainSourceCredibility = mainNews.sources?.credibility_score || 50
   const crossRefCount = crossRefs.length
 
   // Calculate combined credibility
   const allCredibilities = [
     mainSourceCredibility,
-    ...crossRefs.map((r) => r.sources.credibility_score),
+    ...crossRefs.map((r) => r.sources?.credibility_score || 50),
   ]
   const avgCredibility =
     allCredibilities.reduce((a, b) => a + b, 0) / allCredibilities.length
@@ -244,7 +220,7 @@ TIÊU ĐỀ: ${mainNews.original_title}
 NỘI DUNG:
 ${mainNews.original_content || 'Không có nội dung chi tiết'}
 
-NGUỒN: ${mainNews.sources.name}
+NGUỒN: ${mainNews.sources?.name || 'Unknown'}
 ĐỘ UY TÍN NGUỒN: ${mainSourceCredibility}/100
 NGÀY ĐĂNG: ${mainNews.original_published_at || 'Không rõ'}
 
@@ -274,7 +250,7 @@ ${
     ? crossRefs
         .map(
           (ref, i) => `
---- Nguồn ${i + 1}: ${ref.sources.name} (Uy tín: ${ref.sources.credibility_score}/100) ---
+--- Nguồn ${i + 1}: ${ref.sources?.name || 'Unknown'} (Uy tín: ${ref.sources?.credibility_score || 50}/100) ---
 Tiêu đề: ${ref.original_title}
 Nội dung: ${ref.original_content?.substring(0, 300) || 'N/A'}...
 `
@@ -357,15 +333,10 @@ export async function verifyPendingNews(limit: number = 10): Promise<{
   processed: number
   results: { id: string; status: string; error?: string }[]
 }> {
-  const supabase = getSupabaseAdmin()
-
   // Get unprocessed raw news
-  const { data: pending } = await supabase
-    .from('raw_news')
-    .select('id')
-    .eq('is_processed', false)
-    .order('created_at', { ascending: true })
-    .limit(limit)
+  const pending = await prisma.$queryRaw<any[]>`
+    SELECT id FROM raw_news WHERE is_processed = false ORDER BY created_at ASC LIMIT ${limit}
+  `
 
   if (!pending || pending.length === 0) {
     return { processed: 0, results: [] }

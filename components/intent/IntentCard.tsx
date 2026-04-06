@@ -88,17 +88,58 @@ export function IntentCard({ intent, compact = true, basePath = '/demo/can-co' }
     ? formatPrice(intent.price)
     : formatPriceRange(intent.price_min, intent.price_max);
 
+  const handleToggleInterest = async () => {
+    const nextState = !localInterested;
+    setLocalInterested(nextState);
+    if (!intent.id.startsWith('i-')) {
+      // It's a real Postgres UUID!
+      try {
+        await fetch('/api/intents/interest', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: intent.id, increment: nextState })
+        });
+      } catch (e) {
+        console.error('Failed to toggle interest', e);
+      }
+    }
+  };
+
   const cardContent = (
-    <div className="wm-panel transition-all hover:border-[var(--wm-border-strong)]">
+    <div className={cn(
+      "wm-panel transition-all hover:border-[var(--wm-border-strong)]",
+      intent.is_bot && "border-teal-500/20 bg-teal-500/[0.02]"
+    )}>
       {/* Header: User + Type Badge */}
       <div className="p-3 pb-0">
         <div className="flex items-start gap-3">
-          <UserAvatar name={intent.user.name} verificationLevel={intent.user.verification_level} />
+          {intent.is_bot ? (
+            <div 
+              className="w-10 h-10 flex items-center justify-center text-white text-lg shrink-0 shadow-[0_0_10px_rgba(20,184,166,0.3)] border border-teal-500/50"
+              style={{ backgroundColor: (intent.user as any)?.bot_color || '#0e7490' }}
+            >
+              🤖
+            </div>
+          ) : (
+            <UserAvatar name={intent.user.name} verificationLevel={intent.user.verification_level} />
+          )}
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
               <span className="font-semibold text-sm text-[var(--wm-text)]">{intent.user.name}</span>
+              {intent.is_bot && (
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-teal-500/20 text-teal-400 font-bold border border-teal-500/30 tracking-widest shrink-0 shadow-[0_0_8px_rgba(20,184,166,0.15)]">
+                  BOT TỰ ĐỘNG
+                </span>
+              )}
               <span className="text-xs text-[var(--wm-text-faint)]">·</span>
-              <span className="text-xs text-[var(--wm-text-muted)]">{formatDistanceToNow(intent.created_at)}</span>
+              <span className="text-xs text-[var(--wm-text-muted)]">
+                {(() => {
+                  const isEdited = intent.updated_at && (new Date(intent.updated_at).getTime() - new Date(intent.created_at).getTime()) > 60_000;
+                  return isEdited
+                    ? <>{formatDistanceToNow(intent.updated_at)} <span className="text-[var(--wm-text-faint)] italic">(đã chỉnh sửa)</span></>
+                    : formatDistanceToNow(intent.created_at);
+                })()}
+              </span>
             </div>
             <div className="flex items-center gap-2 mt-0.5 flex-wrap">
               {isCrawled && <span className="wm-badge text-[10px]" style={{ background: 'rgba(14,116,144,0.15)', color: '#0e7490', border: '1px solid rgba(14,116,144,0.25)' }}>📡 Nguồn ngoài</span>}
@@ -117,14 +158,14 @@ export function IntentCard({ intent, compact = true, basePath = '/demo/can-co' }
 
       {/* Content */}
       <div className="px-3 pt-2 pb-2">
-        {intent.title && (
-          <h3 className="font-semibold text-[15px] text-[var(--wm-text)] leading-snug mb-1">{intent.title}</h3>
+        {!!intent.title && (
+          <h3 className="font-semibold text-[15px] text-[var(--wm-text)] leading-snug mb-1">{String(intent.title)}</h3>
         )}
         <p className={cn(
           'text-sm text-[var(--wm-text-secondary)] leading-relaxed',
           compact && 'line-clamp-3',
         )}>
-          {intent.raw_text}
+          {String(intent.raw_text || '')}
         </p>
       </div>
 
@@ -132,6 +173,31 @@ export function IntentCard({ intent, compact = true, basePath = '/demo/can-co' }
       {intent.images.length > 0 && (
         <div className="px-3 pb-2">
           <ImageGrid images={intent.images} />
+        </div>
+      )}
+
+      {/* Source Citation (Nguồn ngoài only) */}
+      {isCrawled && !!(intent.parsed_data as Record<string, unknown>)?.original_url && (
+        <div className="px-3 pb-2">
+          <div className="flex items-center gap-2 text-xs rounded-md px-2.5 py-1.5" style={{ background: 'rgba(14,116,144,0.08)', border: '1px solid rgba(14,116,144,0.15)' }}>
+            <span className="text-[var(--wm-text-muted)]">📰</span>
+            <span className="text-[var(--wm-text-muted)]">Nguồn:</span>
+            <span className="text-cyan-500 font-medium">{(intent.parsed_data as Record<string, unknown>)?.source_name as string || 'Bên ngoài'}</span>
+            <span className="text-[var(--wm-text-faint)]">·</span>
+            <span
+              className="text-cyan-500 hover:text-cyan-400 hover:underline transition-colors cursor-pointer"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                window.open((intent.parsed_data as Record<string, unknown>)?.original_url as string, '_blank', 'noopener,noreferrer');
+              }}
+            >
+              Xem bài gốc ↗
+            </span>
+            {!!(intent.parsed_data as Record<string, unknown>)?.source_dead && (
+              <span className="ml-auto text-amber-500 text-[10px]">⚠️ Nguồn có thể đã gỡ</span>
+            )}
+          </div>
         </div>
       )}
 
@@ -145,6 +211,7 @@ export function IntentCard({ intent, compact = true, basePath = '/demo/can-co' }
           ))}
         </div>
       )}
+
 
       {/* Reactions + Metrics */}
       <div className="px-3 pb-2 flex items-center gap-3 text-xs text-[var(--wm-text-muted)] flex-wrap">
@@ -214,7 +281,7 @@ export function IntentCard({ intent, compact = true, basePath = '/demo/can-co' }
       )}
 
       {/* Action Bar */}
-      <ActionBar intentId={intent.id} interested={localInterested} onToggleInterest={() => setLocalInterested(v => !v)} />
+      <ActionBar intentId={intent.id} interested={localInterested} onToggleInterest={handleToggleInterest} />
     </div>
   );
 
@@ -235,10 +302,12 @@ function ActionBar({ intentId, interested, onToggleInterest }: { intentId: strin
 
   return (
     <div className="flex items-center border-t border-[var(--wm-border)]">
-      <button
+      <div
+        role="button"
+        tabIndex={0}
         onClick={(e) => { e.preventDefault(); e.stopPropagation(); onToggleInterest(); }}
         className={cn(
-          'flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs transition-colors',
+          'flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs transition-colors cursor-pointer',
           interested
             ? 'text-[var(--wm-primary)] font-semibold'
             : 'text-[var(--wm-text-dim)] hover:bg-[var(--wm-surface-hover)]',
@@ -246,21 +315,23 @@ function ActionBar({ intentId, interested, onToggleInterest }: { intentId: strin
       >
         <ThumbsUp className={cn('w-4 h-4', interested && 'fill-current')} />
         <span>{interested ? 'Đã quan tâm' : 'Quan tâm'}</span>
-      </button>
-      <button
-        onClick={(e) => { e.preventDefault(); e.stopPropagation(); /* Navigate to detail for comments */ }}
-        className="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs text-[var(--wm-text-dim)] hover:bg-[var(--wm-surface-hover)] transition-colors"
+      </div>
+      <div
+        className="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs text-[var(--wm-text-dim)] hover:bg-[var(--wm-surface-hover)] transition-colors cursor-pointer"
+        // Không block event để click có thể bubble lên thẻ Link bọc ngoài
       >
         <MessageCircle className="w-4 h-4" />
         <span>Bình luận</span>
-      </button>
-      <button
+      </div>
+      <div
+        role="button"
+        tabIndex={0}
         onClick={(e) => {
           e.preventDefault(); e.stopPropagation();
           toggleSave(intentId);
         }}
         className={cn(
-          'flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs transition-colors',
+          'flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs transition-colors cursor-pointer',
           saved
             ? 'text-yellow-500 font-semibold'
             : 'text-[var(--wm-text-dim)] hover:bg-[var(--wm-surface-hover)]',
@@ -268,7 +339,7 @@ function ActionBar({ intentId, interested, onToggleInterest }: { intentId: strin
       >
         <Bookmark className={cn('w-4 h-4', saved && 'fill-current')} />
         <span>{saved ? 'Đã lưu' : 'Lưu'}</span>
-      </button>
+      </div>
     </div>
   );
 }

@@ -7,11 +7,10 @@ import { Bot, Loader2, Play } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
-import { createClient } from '@/lib/supabase/client'
+import { signIn } from 'next-auth/react'
 
 export default function LoginPage() {
   const router = useRouter()
-  const supabase = createClient()
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -24,17 +23,21 @@ export default function LoginPage() {
     setIsLoading(true)
 
     try {
-      const { error } = await supabase.auth.signInWithPassword({
+      const result = await signIn('credentials', {
         email,
         password,
+        redirect: false
       })
 
-      if (error) {
-        setError(error.message)
+      if (result?.error) {
+        setError(result.error)
         return
       }
 
-      router.push('/feed')
+      // Redirect to ?redirect param or /demo
+      const params = new URLSearchParams(window.location.search)
+      const redirectTo = params.get('redirect') || '/'
+      router.push(redirectTo)
       router.refresh()
     } catch {
       setError('Đã xảy ra lỗi. Vui lòng thử lại.')

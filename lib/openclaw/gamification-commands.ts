@@ -94,9 +94,11 @@ async function getStats(context: CommandContext): Promise<CommandResult> {
   const rank = higherRank + 1;
 
   // Get achievements count
-  // TODO: Restore query when user_achievements table is available
-  // const achievements = await prisma.$queryRaw<any[]>`SELECT id FROM user_achievements WHERE user_id = ${context.userId}`;
-  const achievementCount = 0;
+  const achievements = await prisma.userAchievement.findMany({
+    where: { userId: context.userId as string },
+    select: { id: true },
+  });
+  const achievementCount = achievements.length;
 
   const message = context.language === 'vi'
     ? `📊 *Stats của bạn*
@@ -186,11 +188,12 @@ async function getLeaderboardCommand(
 // ═══════════════════════════════════════════════════════════════
 
 async function getAchievementsCommand(context: CommandContext): Promise<CommandResult> {
-  // TODO: Restore when user_achievements table is available
-  // const userAchievements = await prisma.$queryRaw<any[]>`SELECT achievement_id, unlocked_at FROM user_achievements WHERE user_id = ${context.userId}`;
-  const userAchievements: any[] = [];
-  
-  const unlockedIds = new Set(userAchievements.map(a => a.achievement_id));
+  const userAchievements = await prisma.userAchievement.findMany({
+    where: { userId: context.userId as string },
+    select: { achievementType: true, unlockedAt: true },
+  });
+
+  const unlockedIds = new Set(userAchievements.map(a => a.achievementType));
 
   // Sample achievements list
   const allAchievements = [

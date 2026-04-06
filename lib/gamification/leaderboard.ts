@@ -50,8 +50,22 @@ export async function getLeaderboard(
     }
 
     case 'weekly': {
-      // TODO: Implement when PointTransaction features are re-enabled
-      break
+      const weekAgo = new Date();
+      weekAgo.setDate(weekAgo.getDate() - 7);
+      const weeklyPoints = await prisma.pointTransaction.groupBy({
+        by: ['userId'],
+        _sum: { amount: true },
+        where: { createdAt: { gte: weekAgo } },
+        orderBy: { _sum: { amount: 'desc' } },
+        take: limit,
+      });
+      data = weeklyPoints.map(w => ({
+        user_id: w.userId,
+        total_points: w._sum.amount || 0,
+        current_level: 1,
+        current_streak: 0,
+      }));
+      break;
     }
 
     case 'streak': {

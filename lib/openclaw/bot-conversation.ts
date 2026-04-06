@@ -265,17 +265,13 @@ function saveToHistory(
 
 async function awardBotInteractionPoints(userId: string, botHandle: string): Promise<void> {
   try {
-    // TODO: Restore when pointTransaction table is added
-    /*
     await prisma.pointTransaction.create({
       data: {
         userId: userId,
-        action: 'bot_chat',
-        points: 2,
-        metadata: { bot_handle: botHandle, source: 'openclaw' } as any,
+        amount: 2,
+        reason: `bot_chat:${botHandle}`,
       }
     });
-    */
   } catch (error) {
     console.error('Failed to award points:', error);
   }

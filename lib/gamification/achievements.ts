@@ -164,8 +164,16 @@ export async function checkAchievement(
   userId: string,
   achievementId: string
 ): Promise<boolean> {
-  // TODO: Implement properly when userAchievement table is added
-  return false
+  const existing = await prisma.userAchievement.findFirst({
+    where: { userId, achievementType: achievementId },
+  });
+  if (existing) return false; // Already unlocked
+
+  // Not yet unlocked → Create
+  await prisma.userAchievement.create({
+    data: { userId, achievementType: achievementId },
+  });
+  return true; // Just unlocked
 }
 
 export async function checkAllAchievements(userId: string): Promise<string[]> {
@@ -227,13 +235,11 @@ export async function getUserAchievements(userId: string): Promise<{
   locked: Achievement[]
   progress: Record<string, number>
 }> {
-  // TODO: Add back query when userAchievement exists
-  // const userAchievements = await prisma.userAchievement.findMany({
-  //   where: { userId },
-  //   select: { achievementId: true },
-  // })
-  // const unlockedIds = new Set(userAchievements.map(a => a.achievementId))
-  const unlockedIds = new Set<string>()
+  const userAchievements = await prisma.userAchievement.findMany({
+    where: { userId },
+    select: { achievementType: true },
+  });
+  const unlockedIds = new Set(userAchievements.map(a => a.achievementType));
 
   const unlocked = ACHIEVEMENTS.filter(a => unlockedIds.has(a.id))
   const locked = ACHIEVEMENTS.filter(a => !unlockedIds.has(a.id) && !a.secret)

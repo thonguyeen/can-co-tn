@@ -24,8 +24,9 @@ export async function sendScheduledDigests(): Promise<{
   const timeSlot = `${currentHour}:${currentMinute.toString().padStart(2, '0')}`;
 
   // Get users who want digest at this time
-  // TODO: Restore query when userChannel table is added
-  const users: any[] = [];
+  const users: any[] = await prisma.userChannel.findMany({
+    where: { isActive: true },
+  });
   
   const eligibleUsers = users.filter(u => {
     const prefs = (u.preferences || {}) as ChannelPreferences;
@@ -75,20 +76,19 @@ export async function sendScheduledDigests(): Promise<{
     }
   }
 
-  // Log
-  // TODO: Restore when pushLog table is added
-  /*
-  await prisma.pushLog.create({
-    data: {
-      type: 'daily_digest',
-      referenceId: timeSlot,
-      recipientsCount: eligibleUsers.length,
-      sentCount: sent,
-      failedCount: failed,
-      errors: [],
-    }
-  });
-  */
+  // Log digest results
+  try {
+    await prisma.pushLog.create({
+      data: {
+        userId: '11111111-1111-1111-1111-111111111111',
+        title: `Daily Digest ${timeSlot}`,
+        body: `Sent: ${sent}, Failed: ${failed}, Skipped: ${skipped}`,
+        status: failed > 0 ? 'partial' : 'sent',
+      }
+    });
+  } catch (e) {
+    console.error('Failed to log digest push:', e);
+  }
 
   return { sent, failed, skipped };
 }
@@ -218,9 +218,10 @@ export async function sendDigestToUser(
 ): Promise<boolean> {
   const client = getOpenClawClient();
 
-  // Find user by composite unique constraint
-  // TODO: Restore query when userChannel table is added
-  const userChannel: any = null;
+  // Find user's active channel
+  const userChannel: any = await prisma.userChannel.findFirst({
+    where: { userId, isActive: true },
+  });
 
   const language = (userChannel?.preferences as ChannelPreferences)?.language || 'vi';
 

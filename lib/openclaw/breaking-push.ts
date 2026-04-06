@@ -63,20 +63,19 @@ export async function pushBreakingNews(
     canvas
   );
 
-  // Log push
-  // TODO: Restore when pushLog is added
-  /*
-  await prisma.pushLog.create({
-    data: {
-      type: 'breaking_news',
-      referenceId: breakingId,
-      recipientsCount: subscribers.length,
-      sentCount: result.sent,
-      failedCount: result.failed,
-      errors: result.errors as any,
-    }
-  });
-  */
+  // Log push results
+  try {
+    await prisma.pushLog.create({
+      data: {
+        userId: '11111111-1111-1111-1111-111111111111',
+        title: `Breaking: ${breaking.headline?.slice(0, 80) || breakingId}`,
+        body: `Sent: ${result.sent}/${subscribers.length}, Failed: ${result.failed}`,
+        status: result.failed > 0 ? 'partial' : 'sent',
+      }
+    });
+  } catch (e) {
+    console.error('Failed to log breaking push:', e);
+  }
 
   return { sent: result.sent, failed: result.failed };
 }
